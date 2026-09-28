@@ -47,9 +47,10 @@ MIN_LINE_WIDTH_RATIO = 0.12
 MIN_LINES = 3
 DILATION_H = 50
 DILATION_V = 3
-MIN_CURVATURE = 3.0        # median curvature threshold — only correct noticeable warping
-MAX_CURVATURE = 20.0       # reject lines with curvature above this (likely bad fits)
-MAX_FIT_RESIDUAL = 5.0     # max RMS residual for accepted fit
+MIN_CURVATURE = 5.0        # median curvature threshold — only correct clearly visible warping
+MAX_CURVATURE = 15.0       # reject lines with curvature above this (likely bad fits)
+MAX_FIT_RESIDUAL = 4.0     # max RMS residual for accepted fit
+DEWARP_DAMPING = 0.7       # scale displacement field to avoid overcorrection
 MARGIN_FRACTION = 0.03     # ignore this fraction at page edges
 BG_KERNEL_SIZE = 51        # morphological closing kernel for background
 BLUR_SIZE = 3              # Gaussian blur kernel
@@ -208,10 +209,10 @@ def dewarp_page(gray):
         return gray, False
 
     # Remove outlier curves: reject lines with curvature > MAX_CURVATURE
-    # or > 4× the median curvature (likely bad fits, not real warping)
+    # or > 2.5× the median curvature (likely bad fits, not real warping)
     curvatures = [fl['curvature'] for fl in fitted]
     med_curv = float(np.median(curvatures))
-    curv_limit = min(MAX_CURVATURE, max(med_curv * 4, MIN_CURVATURE * 2))
+    curv_limit = min(MAX_CURVATURE, max(med_curv * 2.5, MIN_CURVATURE * 1.5))
     fitted = [fl for fl in fitted if fl['curvature'] <= curv_limit]
     if len(fitted) < MIN_LINES:
         return gray, False
@@ -224,8 +225,8 @@ def dewarp_page(gray):
     if dy_field is None:
         return gray, False
 
-    # Up-scale field to original resolution
-    full_field = cv2.resize(dy_field, (w, h), interpolation=cv2.INTER_LINEAR) / scale
+    # Up-scale field to original resolution, dampen to avoid overcorrection
+    full_field = cv2.resize(dy_field, (w, h), interpolation=cv2.INTER_LINEAR) / scale * DEWARP_DAMPING
 
     map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
     map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
@@ -261,15 +262,17 @@ def clean_page(gray):
     no_bleed = cv2.bitwise_not(opened)
 
     # Otsu white-point stretch: Otsu finds the threshold between text and
-    # background.  Map everything above it to 255 (white), stretch the dark
-    # text range proportionally so real text stays dark and natural.
+    # background.  Stretch the range so background becomes white and text
+    # stays dark and natural without losing lighter strokes.
     otsu_val, _ = cv2.threshold(no_bleed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    white_pt = float(otsu_val)
 
-    # Black point: 5th percentile of pixels darker than Otsu (actual text)
+    # Push white point 10% above Otsu so near-text grays aren't clipped
+    white_pt = min(float(otsu_val) * 1.10, 255.0)
+
+    # Black point: 2nd percentile of text pixels — darker anchor keeps text bold
     dark_pixels = no_bleed[no_bleed < otsu_val]
     if len(dark_pixels) > 100:
-        black_pt = float(np.percentile(dark_pixels, 5))
+        black_pt = float(np.percentile(dark_pixels, 2))
     else:
         black_pt = 0.0
 

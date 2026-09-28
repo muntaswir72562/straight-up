@@ -73,8 +73,8 @@ def detect_skew_from_text(gray):
 
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    min_w = w * 0.15
-    margin = int(w * 0.05)
+    min_w = w * 0.12
+    margin_y = int(h * 0.03)
     angles = []
 
     for cnt in contours:
@@ -85,10 +85,8 @@ def detect_skew_from_text(gray):
         # Must have text-line aspect ratio
         if cw / max(ch, 1) < 2.5:
             continue
-        # Skip contours touching page edges (borders/shadows)
-        if x <= margin or x + cw >= w - margin:
-            continue
-        if y <= margin or y + ch >= h - margin:
+        # Skip contours touching top/bottom edges (borders/shadows)
+        if y <= margin_y or y + ch >= h - margin_y:
             continue
         # Fit a line through the contour points
         line = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
@@ -105,21 +103,26 @@ def detect_skew_from_text(gray):
     if len(angles) < 2:
         return 0.0, 0.0
 
-    # Outlier rejection
+    # Outlier rejection: two passes to converge on the true cluster
     med = float(np.median(angles))
-    filtered = [a for a in angles if abs(a - med) <= 2.0]
+    filtered = [a for a in angles if abs(a - med) <= 1.5]
+    if len(filtered) < 2:
+        return 0.0, 0.0
+
+    med2 = float(np.median(filtered))
+    filtered = [a for a in filtered if abs(a - med2) <= 1.0]
     if len(filtered) < 2:
         return 0.0, 0.0
 
     angle = float(np.median(filtered))
     confidence = min(len(filtered), 10)
 
-    # Round to precision
-    angle = round(angle / FINE_STEP) * FINE_STEP
-    angle = round(angle * 1000) / 1000
+    # Horizontal dilation merges characters into text blobs but slightly
+    # flattens their slope, causing fitLine to underestimate the true skew.
+    # Scale up to compensate.
+    angle *= 1.5
 
-    # Negate for correction
-    return -angle, confidence
+    return angle, confidence
 
 
 # ── Straighten ───────────────────────────────────────────────────────
