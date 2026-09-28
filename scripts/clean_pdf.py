@@ -19,6 +19,7 @@ On completion:
 """
 
 import sys
+import gc
 import json
 import os
 import traceback
@@ -41,6 +42,7 @@ except ImportError:
 # ── Constants ────────────────────────────────────────────────────────
 RENDER_DPI = 200
 DETECT_WIDTH = 1000
+BATCH_SIZE = 50
 MIN_LINE_WIDTH_RATIO = 0.12
 MIN_LINES = 3
 DILATION_H = 50
@@ -281,6 +283,36 @@ def clean_page(gray):
     return stretched
 
 
+# ── Incremental merge ────────────────────────────────────────────────
+
+def _merge_batches(batch_files, output_path, metadata):
+    """Merge batch PDFs into output one at a time to cap memory usage."""
+    if len(batch_files) == 1:
+        doc = fitz.open(batch_files[0])
+        doc.set_metadata(metadata)
+        doc.save(output_path, deflate=True, garbage=3)
+        doc.close()
+        os.remove(batch_files[0])
+        return
+
+    os.rename(batch_files[0], output_path)
+
+    for bf in batch_files[1:]:
+        acc = fitz.open(output_path)
+        batch = fitz.open(bf)
+        acc.insert_pdf(batch)
+        batch.close()
+        os.remove(bf)
+        acc.save(output_path, incremental=True, encryption=0)
+        acc.close()
+        gc.collect()
+
+    final = fitz.open(output_path)
+    final.set_metadata(metadata)
+    final.save(output_path, incremental=True, encryption=0)
+    final.close()
+
+
 # ── Main pipeline ────────────────────────────────────────────────────
 
 def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
@@ -290,7 +322,11 @@ def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
     print(f"[clean-pdf] {total} pages", file=sys.stderr)
 
     write_progress(progress_file, 'preparing', 0, total)
-    out_doc = fitz.open()
+
+    tmp_dir = os.path.dirname(output_path)
+    batch_files = []
+    batch_doc = fitz.open()
+    pages_in_batch = 0
 
     for idx in range(total):
         pnum = idx + 1
@@ -299,55 +335,91 @@ def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
         page = doc[idx]
         try:
             pix = page.get_pixmap(dpi=RENDER_DPI)
-            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n).copy()
+            n_channels = pix.n
+            rect = page.rect
+            del pix
 
             # Detect color pages (covers, illustrations) and skip them
             is_color = False
-            if pix.n >= 3:
+            if n_channels >= 3:
                 hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
                 mean_sat = float(np.mean(hsv[:, :, 1]))
-                # Color pages typically have mean saturation > 20
                 is_color = mean_sat > 20
+                del hsv
 
             if is_color:
                 print(f"[clean-pdf] Page {pnum}/{total}: color page, copying as-is",
                       file=sys.stderr)
-                out_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+                del img
+                batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+                pages_in_batch += 1
+                if pages_in_batch >= BATCH_SIZE and pnum < total:
+                    batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+                    batch_doc.save(batch_path, deflate=True)
+                    batch_doc.close()
+                    batch_files.append(batch_path)
+                    batch_doc = fitz.open()
+                    pages_in_batch = 0
+                    gc.collect()
                 continue
 
-            if pix.n == 4:
+            if n_channels == 4:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
-            elif pix.n == 3:
+            elif n_channels == 3:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             else:
                 gray = img.copy()
+            del img
 
             print(f"[clean-pdf] Page {pnum}/{total}: {gray.shape[1]}x{gray.shape[0]}",
                   file=sys.stderr)
 
             dewarped, was_dewarped = dewarp_page(gray)
+            del gray
             cleaned = clean_page(dewarped)
+            del dewarped
 
             print(f"[clean-pdf] Page {pnum}: dewarped={was_dewarped}", file=sys.stderr)
 
             _, jpeg_buf = cv2.imencode('.jpg', cleaned,
                                        [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            del cleaned
 
-            rect = page.rect
-            new_page = out_doc.new_page(width=rect.width, height=rect.height)
+            new_page = batch_doc.new_page(width=rect.width, height=rect.height)
             new_page.insert_image(rect, stream=jpeg_buf.tobytes())
+            del jpeg_buf
 
         except Exception:
             print(f"[clean-pdf] Page {pnum} failed:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            out_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+            batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
-    out_doc.set_metadata({'title': book_name, 'producer': 'Straight Up – Clean & Dewarp'})
+        pages_in_batch += 1
 
-    print(f"[clean-pdf] Saving to {output_path}", file=sys.stderr)
-    out_doc.save(output_path, deflate=True, garbage=3)
-    out_doc.close()
+        if pages_in_batch >= BATCH_SIZE and pnum < total:
+            batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+            batch_doc.save(batch_path, deflate=True)
+            batch_doc.close()
+            batch_files.append(batch_path)
+            batch_doc = fitz.open()
+            pages_in_batch = 0
+            gc.collect()
+            print(f"[clean-pdf] Flushed batch {len(batch_files)} to disk "
+                  f"({pnum}/{total})", file=sys.stderr)
+
     doc.close()
+
+    # Save the last (possibly only) batch
+    last_batch = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+    batch_doc.save(last_batch, deflate=True)
+    batch_doc.close()
+    batch_files.append(last_batch)
+    gc.collect()
+
+    print(f"[clean-pdf] Merging {len(batch_files)} batch(es)", file=sys.stderr)
+    metadata = {'title': book_name, 'producer': 'Straight Up \u2013 Clean & Dewarp'}
+    _merge_batches(batch_files, output_path, metadata)
 
     write_progress(progress_file, 'done', total, total)
     print("[clean-pdf] Done!", file=sys.stderr)

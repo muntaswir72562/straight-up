@@ -18,7 +18,9 @@ Progress is written to <progress_file> as JSON after each page:
 
 import sys
 import os
+import gc
 import json
+import tempfile
 import traceback
 import numpy as np
 import cv2
@@ -39,6 +41,7 @@ from clean_pdf import dewarp_page, clean_page
 # ── Constants ────────────────────────────────────────────────────────
 RENDER_DPI = 200
 JPEG_QUALITY = 92
+BATCH_SIZE = 50  # pages per batch before flushing to disk
 
 
 # ── Progress ─────────────────────────────────────────────────────────
@@ -48,7 +51,112 @@ def write_progress(path, phase, current, total):
         json.dump({'phase': phase, 'current': current, 'total': total}, f)
 
 
+# ── Incremental merge ────────────────────────────────────────────────
+
+def _merge_batches(batch_files, output_path, metadata):
+    """Merge batch PDFs into output one at a time to cap memory usage."""
+    if len(batch_files) == 1:
+        # Single batch — just rename and set metadata
+        doc = fitz.open(batch_files[0])
+        doc.set_metadata(metadata)
+        doc.save(output_path, deflate=True, garbage=3)
+        doc.close()
+        os.remove(batch_files[0])
+        return
+
+    # Start with first batch as the accumulator on disk
+    os.rename(batch_files[0], output_path)
+
+    for bf in batch_files[1:]:
+        acc = fitz.open(output_path)
+        batch = fitz.open(bf)
+        acc.insert_pdf(batch)
+        batch.close()
+        os.remove(bf)
+        acc.save(output_path, incremental=True, encryption=0)
+        acc.close()
+        gc.collect()
+
+    # Set metadata on final file
+    final = fitz.open(output_path)
+    final.set_metadata(metadata)
+    final.save(output_path, incremental=True, encryption=0)
+    final.close()
+
+
 # ── Main pipeline ────────────────────────────────────────────────────
+
+def process_page(doc, idx, do_straighten, do_clean, total):
+    """Process a single page. Returns (jpeg_bytes, rect) if modified, else None."""
+    pnum = idx + 1
+    page = doc[idx]
+
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n).copy()
+    n_channels = pix.n
+    rect = page.rect
+    del pix
+
+    # Detect color pages (covers, illustrations) — skip cleaning on these
+    is_color = False
+    if do_clean and n_channels >= 3:
+        hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
+        mean_sat = float(np.mean(hsv[:, :, 1]))
+        is_color = mean_sat > 20
+        del hsv
+
+    if n_channels == 4:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+    elif n_channels == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img.copy()
+    del img
+
+    modified = False
+    result = gray
+
+    # --- Step 1: Straighten ---
+    if do_straighten:
+        h, w = result.shape
+        scale = DETECT_WIDTH / w
+        dh = int(h * scale)
+        small = cv2.resize(result, (DETECT_WIDTH, dh), interpolation=cv2.INTER_AREA)
+        angle, confidence = detect_skew_from_text(small)
+        del small
+
+        if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
+            result = straighten_page(result, angle)
+            modified = True
+            print(f"[fullfix] Page {pnum}/{total}: straightened {angle:.2f}\u00b0 "
+                  f"conf={confidence:.1f}", file=sys.stderr)
+        else:
+            print(f"[fullfix] Page {pnum}/{total}: skew={angle:.2f}\u00b0 "
+                  f"conf={confidence:.1f} \u2014 no straighten needed", file=sys.stderr)
+
+    # --- Step 2: Clean & Dewarp ---
+    if do_clean and not is_color:
+        dewarped, was_dewarped = dewarp_page(result)
+        del result
+        cleaned = clean_page(dewarped)
+        del dewarped
+        result = cleaned
+        modified = True
+        print(f"[fullfix] Page {pnum}/{total}: cleaned, "
+              f"dewarped={was_dewarped}", file=sys.stderr)
+    elif is_color:
+        print(f"[fullfix] Page {pnum}/{total}: color page, "
+              f"skipping clean", file=sys.stderr)
+
+    if modified:
+        _, jpeg_buf = cv2.imencode('.jpg', result,
+                                   [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        del result
+        return jpeg_buf.tobytes(), rect
+    else:
+        del result
+        return None
+
 
 def process_pdf(input_path, output_path, progress_file, book_name='fixed',
                 do_straighten=True, do_clean=True):
@@ -59,85 +167,59 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
     print(f"[fullfix] {total} pages", file=sys.stderr)
 
     write_progress(progress_file, 'preparing', 0, total)
-    out_doc = fitz.open()
+
+    tmp_dir = os.path.dirname(output_path)
+    batch_files = []
+    batch_doc = fitz.open()
+    pages_in_batch = 0
 
     for idx in range(total):
         pnum = idx + 1
         write_progress(progress_file, 'fixing', pnum, total)
 
-        page = doc[idx]
         try:
-            pix = page.get_pixmap(dpi=RENDER_DPI)
-            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+            page_result = process_page(doc, idx, do_straighten, do_clean, total)
 
-            # Detect color pages (covers, illustrations) — skip cleaning on these
-            is_color = False
-            if do_clean and pix.n >= 3:
-                hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
-                mean_sat = float(np.mean(hsv[:, :, 1]))
-                is_color = mean_sat > 20
-
-            if pix.n == 4:
-                gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
-            elif pix.n == 3:
-                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            if page_result is not None:
+                jpeg_bytes, rect = page_result
+                new_page = batch_doc.new_page(width=rect.width, height=rect.height)
+                new_page.insert_image(rect, stream=jpeg_bytes)
+                del jpeg_bytes
             else:
-                gray = img.copy()
-
-            modified = False
-            result = gray
-
-            # --- Step 1: Straighten ---
-            if do_straighten:
-                h, w = result.shape
-                scale = DETECT_WIDTH / w
-                dh = int(h * scale)
-                small = cv2.resize(result, (DETECT_WIDTH, dh), interpolation=cv2.INTER_AREA)
-
-                angle, confidence = detect_skew_from_text(small)
-
-                if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
-                    result = straighten_page(result, angle)
-                    modified = True
-                    print(f"[fullfix] Page {pnum}/{total}: straightened {angle:.2f}° "
-                          f"conf={confidence:.1f}", file=sys.stderr)
-                else:
-                    print(f"[fullfix] Page {pnum}/{total}: skew={angle:.2f}° "
-                          f"conf={confidence:.1f} — no straighten needed", file=sys.stderr)
-
-            # --- Step 2: Clean & Dewarp ---
-            if do_clean and not is_color:
-                dewarped, was_dewarped = dewarp_page(result)
-                cleaned = clean_page(dewarped)
-                result = cleaned
-                modified = True
-                print(f"[fullfix] Page {pnum}/{total}: cleaned, "
-                      f"dewarped={was_dewarped}", file=sys.stderr)
-            elif is_color:
-                print(f"[fullfix] Page {pnum}/{total}: color page, "
-                      f"skipping clean", file=sys.stderr)
-
-            # --- Output ---
-            if modified:
-                _, jpeg_buf = cv2.imencode('.jpg', result,
-                                           [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-                rect = page.rect
-                new_page = out_doc.new_page(width=rect.width, height=rect.height)
-                new_page.insert_image(rect, stream=jpeg_buf.tobytes())
-            else:
-                out_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+                batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
         except Exception:
             print(f"[fullfix] Page {pnum} failed:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            out_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+            batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
-    out_doc.set_metadata({'title': book_name, 'producer': 'Straight Up – Full Fix'})
+        pages_in_batch += 1
 
-    print(f"[fullfix] Saving to {output_path}", file=sys.stderr)
-    out_doc.save(output_path, deflate=True, garbage=3)
-    out_doc.close()
+        # Flush batch to disk to free memory
+        if pages_in_batch >= BATCH_SIZE and pnum < total:
+            batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+            batch_doc.save(batch_path, deflate=True)
+            batch_doc.close()
+            batch_files.append(batch_path)
+            batch_doc = fitz.open()
+            pages_in_batch = 0
+            gc.collect()
+            print(f"[fullfix] Flushed batch {len(batch_files)} to disk "
+                  f"({pnum}/{total})", file=sys.stderr)
+
     doc.close()
+
+    # Save the last (possibly only) batch
+    last_batch = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+    batch_doc.save(last_batch, deflate=True)
+    batch_doc.close()
+    batch_files.append(last_batch)
+    gc.collect()
+
+    # Merge batches incrementally — only 2 PDFs in memory at a time
+    print(f"[fullfix] Merging {len(batch_files)} batch(es)", file=sys.stderr)
+    metadata = {'title': book_name, 'producer': 'Straight Up \u2013 Full Fix'}
+    _merge_batches(batch_files, output_path, metadata)
 
     write_progress(progress_file, 'done', total, total)
     print("[fullfix] Done!", file=sys.stderr)
