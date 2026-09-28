@@ -2,13 +2,8 @@
 FROM node:20-slim AS deps
 WORKDIR /app
 
-COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
-RUN \
-  if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; \
-  elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
-  elif [ -f package-lock.json ]; then npm ci; \
-  else npm install; \
-  fi
+COPY package.json package-lock.json* ./
+RUN npm install
 
 # --- Stage 2: Build the Next.js app ---
 FROM node:20-slim AS builder
