@@ -80,7 +80,8 @@ export async function loadPdfDocument(file: File): Promise<PDFDocumentProxy> {
  */
 export async function renderPage(
   pdf: PDFDocumentProxy,
-  pageNumber: number
+  pageNumber: number,
+  dpi: number = RENDER_DPI
 ): Promise<PageRenderResult> {
   const page = await pdf.getPage(pageNumber);
 
@@ -89,7 +90,7 @@ export async function renderPage(
   const pageSizePoints = { width: viewport1.width, height: viewport1.height };
 
   // Calculate scale for target DPI (PDF default is 72 DPI)
-  let scale = RENDER_DPI / 72;
+  let scale = dpi / 72;
 
   // Cap so neither dimension exceeds MAX_RENDER_DIMENSION
   const renderWidth = viewport1.width * scale;

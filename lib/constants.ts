@@ -34,3 +34,29 @@ export const AUTO_CROP = true;
 
 /** Width in pixels for page thumbnails in Replace Pages mode */
 export const THUMBNAIL_WIDTH = 180;
+
+/* --- Page Cleaning constants --- */
+export const CLEAN_BLUR_SIZE = 3;
+export const CLEAN_BG_KERNEL_SIZE = 51;
+export const CLEAN_OPEN_KERNEL_SIZE = 3;
+export const CLEAN_ADAPTIVE_BLOCK = 31;
+export const CLEAN_ADAPTIVE_C = 10;
+
+/* --- Dewarping constants --- */
+export const DEWARP_DETECT_WIDTH = 1000;
+export const DEWARP_MIN_LINE_WIDTH_RATIO = 0.12;
+export const DEWARP_MIN_LINES = 4;
+export const DEWARP_DILATION_H = 50;
+export const DEWARP_DILATION_V = 3;
+export const DEWARP_POLY_DEGREE = 2;
+export const DEWARP_MIN_CURVATURE = 1.5;
+export const DEWARP_MAX_FIT_RESIDUAL = 5.0;
+export const DEWARP_MARGIN_FRACTION = 0.03;
+export const DEWARP_FIELD_SIGMA_X = 30;
+export const DEWARP_FIELD_SIGMA_Y = 15;
+
+/** Render DPI for clean pipeline (binary output is less resolution-sensitive) */
+export const CLEAN_RENDER_DPI = 150;
+
+/** Default fallback filename for clean-only mode */
+export const FALLBACK_CLEAN_FILENAME = 'cleaned';

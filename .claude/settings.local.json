@@ -4,7 +4,9 @@
       "Bash(npm view:*)",
       "Bash(npx next build:*)",
       "Bash(pip install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(dir \"C:\\\\Users\\\\MuntaswirW\\\\straight-up\\\\test scan book\")",
+      "WebSearch"
     ]
   }
 }

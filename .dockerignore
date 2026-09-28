@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.gitignore
+*.md
+test scan book/
+scripts/test_pages/
+scripts/prototype_*.py
+scripts/extract_test_pages.py
+PLAN.md
+.vercel
+.env*

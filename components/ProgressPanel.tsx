@@ -13,6 +13,9 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
   preparing: () => 'Preparing... (loading image tools)',
   detecting: (c, t) => `Analysing page ${c} of ${t}...`,
   straightening: (c, t) => `Straightening page ${c} of ${t}...`,
+  cleaning: (c, t) => `Cleaning page ${c} of ${t}...`,
+  dewarping: (c, t) => `Dewarping page ${c} of ${t}...`,
+  fixing: (c, t) => `Fixing page ${c} of ${t}...`,
   merging: (c, t) => `Merging page ${c} of ${t}...`,
 };
 

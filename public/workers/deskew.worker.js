@@ -29,6 +29,26 @@ var MIN_TEXT_PIXEL_RATIO = 0.01;
 var JPEG_QUALITY = 0.85;
 var THUMBNAIL_WIDTH = 200;
 
+// --- Page Cleaning constants ---
+var CLEAN_BLUR_SIZE = 3;
+var CLEAN_BG_KERNEL_SIZE = 51;
+var CLEAN_OPEN_KERNEL_SIZE = 3;
+var CLEAN_ADAPTIVE_BLOCK = 31;
+var CLEAN_ADAPTIVE_C = 10;
+
+// --- Dewarping constants ---
+var DEWARP_DETECT_WIDTH = 1000;
+var DEWARP_MIN_LINE_WIDTH_RATIO = 0.12;
+var DEWARP_MIN_LINES = 4;
+var DEWARP_DILATION_H = 50;
+var DEWARP_DILATION_V = 3;
+var DEWARP_POLY_DEGREE = 2;
+var DEWARP_MIN_CURVATURE = 1.5;
+var DEWARP_MAX_FIT_RESIDUAL = 5.0;
+var DEWARP_MARGIN_FRACTION = 0.03;
+var DEWARP_FIELD_SIGMA_X = 30;
+var DEWARP_FIELD_SIGMA_Y = 15;
+
 // --- Load OpenCV ---
 importScripts('/opencv/opencv.js');
 
@@ -73,6 +93,8 @@ onmessage = function (e) {
     }
   } else if (msg.type === 'straighten') {
     straightenPage(msg.id, msg.imageData, msg.width, msg.height, msg.angle, msg.autoCrop);
+  } else if (msg.type === 'cleanDewarp') {
+    cleanAndDewarpPage(msg.id, msg.imageData, msg.width, msg.height);
   }
 };
 
@@ -562,4 +584,587 @@ function argmax(arr) {
     if (arr[i] > arr[maxIdx]) maxIdx = i;
   }
   return maxIdx;
+}
+
+// ============================================================
+// PAGE CLEANING
+// ============================================================
+
+/**
+ * Clean a grayscale page: normalize background to white, remove
+ * bleed-through, produce binary output (black text on white).
+ *
+ * Accepts and returns a cv.Mat (grayscale uint8).
+ */
+function cleanPageMat(gray) {
+  // 1. Light Gaussian blur to reduce noise
+  var blurred = new cv.Mat();
+  cv.GaussianBlur(gray, blurred, new cv.Size(CLEAN_BLUR_SIZE, CLEAN_BLUR_SIZE), 0);
+
+  // 2. Estimate background via morphological closing (large kernel fills text)
+  var bgKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE,
+    new cv.Size(CLEAN_BG_KERNEL_SIZE, CLEAN_BG_KERNEL_SIZE));
+  var background = new cv.Mat();
+  cv.morphologyEx(blurred, background, cv.MORPH_CLOSE, bgKernel);
+  bgKernel.delete();
+
+  // 3. Divide: normalize lighting (scale=255 maps paper tone to white)
+  var normalized = new cv.Mat();
+  cv.divide(blurred, background, normalized, 255.0);
+  blurred.delete();
+  background.delete();
+
+  // 4. Remove bleed-through via morphological opening on inverted image
+  var inverted = new cv.Mat();
+  cv.bitwise_not(normalized, inverted);
+  normalized.delete();
+
+  var openKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE,
+    new cv.Size(CLEAN_OPEN_KERNEL_SIZE, CLEAN_OPEN_KERNEL_SIZE));
+  var opened = new cv.Mat();
+  cv.morphologyEx(inverted, opened, cv.MORPH_OPEN, openKernel);
+  openKernel.delete();
+  inverted.delete();
+
+  var cleaned = new cv.Mat();
+  cv.bitwise_not(opened, cleaned);
+  opened.delete();
+
+  // 5. Adaptive threshold for binary output
+  var binary = new cv.Mat();
+  cv.adaptiveThreshold(cleaned, binary, 255,
+    cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY,
+    CLEAN_ADAPTIVE_BLOCK, CLEAN_ADAPTIVE_C);
+  cleaned.delete();
+
+  return binary;
+}
+
+// ============================================================
+// PAGE DEWARPING
+// ============================================================
+
+/**
+ * Detect text line contours via aggressive horizontal dilation.
+ * Returns array of { bbox, centerY, midlinePoints }.
+ */
+function detectTextLines(gray, width, height) {
+  // Adaptive threshold
+  var binary = new cv.Mat();
+  cv.adaptiveThreshold(gray, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+    cv.THRESH_BINARY_INV, 25, 10);
+
+  // Horizontal dilation to merge chars into lines
+  var hKernel = cv.getStructuringElement(cv.MORPH_RECT,
+    new cv.Size(DEWARP_DILATION_H, DEWARP_DILATION_V));
+  var dilated = new cv.Mat();
+  cv.dilate(binary, dilated, hKernel, new cv.Point(-1, -1), 2);
+  hKernel.delete();
+
+  // Close small gaps
+  var closeKernel = cv.getStructuringElement(cv.MORPH_RECT,
+    new cv.Size(Math.floor(DEWARP_DILATION_H / 2), 1));
+  var closed = new cv.Mat();
+  cv.morphologyEx(dilated, closed, cv.MORPH_CLOSE, closeKernel);
+  closeKernel.delete();
+  dilated.delete();
+
+  // Find contours
+  var contours = new cv.MatVector();
+  var hierarchy = new cv.Mat();
+  cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  closed.delete();
+  hierarchy.delete();
+
+  var minLineWidth = width * DEWARP_MIN_LINE_WIDTH_RATIO;
+  var lines = [];
+
+  for (var i = 0; i < contours.size(); i++) {
+    var rect = cv.boundingRect(contours.get(i));
+    var x = rect.x, y = rect.y, cw = rect.width, ch = rect.height;
+
+    if (cw < minLineWidth) continue;
+    if (ch > height * 0.08) continue;
+    if (ch < 3) continue;
+    if (cw / Math.max(ch, 1) < 2.5) continue;
+    if (y <= 1 || y + ch >= height - 1) continue;
+
+    // Sample midline from the original binary image
+    var midline = sampleMidline(binary, x, y, cw, ch);
+    if (midline.length >= 8) {
+      lines.push({
+        bbox: [x, y, cw, ch],
+        centerY: y + ch / 2,
+        midline: midline,
+      });
+    }
+  }
+
+  // Clean up contours
+  for (var ci = 0; ci < contours.size(); ci++) contours.get(ci).delete();
+  contours.delete();
+  binary.delete();
+
+  // Sort by y position
+  lines.sort(function (a, b) { return a.centerY - b.centerY; });
+  return lines;
+}
+
+/**
+ * Sample vertical midpoint of ink pixels at regular x intervals along a text line.
+ */
+function sampleMidline(binary, xOff, yOff, cw, ch) {
+  var points = [];
+  var step = Math.max(2, Math.floor(cw / 40));
+
+  for (var lx = step; lx < cw - step; lx += step) {
+    var absX = lx + xOff;
+    if (absX >= binary.cols) continue;
+
+    // Count ink pixels in this column within the bounding box
+    var inkRows = [];
+    for (var ly = 0; ly < ch; ly++) {
+      var absY = yOff + ly;
+      if (absY < binary.rows && binary.ucharAt(absY, absX) > 0) {
+        inkRows.push(absY);
+      }
+    }
+
+    if (inkRows.length >= 2) {
+      // Center of mass
+      var sum = 0;
+      for (var ri = 0; ri < inkRows.length; ri++) sum += inkRows[ri];
+      points.push({ x: absX, y: sum / inkRows.length });
+    }
+  }
+
+  return points;
+}
+
+/**
+ * Fit a quadratic polynomial to points using least squares.
+ * Returns coefficients [a, b, c] for y = a*x^2 + b*x + c, or null if insufficient data.
+ */
+function polyfit2(points) {
+  var n = points.length;
+  if (n < 3) return null;
+
+  // Build normal equations for degree-2 polynomial
+  var sumX0 = 0, sumX1 = 0, sumX2 = 0, sumX3 = 0, sumX4 = 0;
+  var sumY = 0, sumXY = 0, sumX2Y = 0;
+
+  for (var i = 0; i < n; i++) {
+    var x = points[i].x;
+    var y = points[i].y;
+    var x2 = x * x;
+    sumX0 += 1;
+    sumX1 += x;
+    sumX2 += x2;
+    sumX3 += x2 * x;
+    sumX4 += x2 * x2;
+    sumY += y;
+    sumXY += x * y;
+    sumX2Y += x2 * y;
+  }
+
+  // Solve 3x3 system using Cramer's rule
+  // [sumX4 sumX3 sumX2] [a]   [sumX2Y]
+  // [sumX3 sumX2 sumX1] [b] = [sumXY ]
+  // [sumX2 sumX1 sumX0] [c]   [sumY  ]
+  var A = [
+    [sumX4, sumX3, sumX2],
+    [sumX3, sumX2, sumX1],
+    [sumX2, sumX1, sumX0]
+  ];
+  var B = [sumX2Y, sumXY, sumY];
+
+  var det = det3(A);
+  if (Math.abs(det) < 1e-12) return null;
+
+  var a = det3(replaceCol(A, B, 0)) / det;
+  var b = det3(replaceCol(A, B, 1)) / det;
+  var c = det3(replaceCol(A, B, 2)) / det;
+
+  return [a, b, c];
+}
+
+function det3(m) {
+  return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+       - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+       + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+}
+
+function replaceCol(m, b, col) {
+  var r = [
+    [m[0][0], m[0][1], m[0][2]],
+    [m[1][0], m[1][1], m[1][2]],
+    [m[2][0], m[2][1], m[2][2]]
+  ];
+  r[0][col] = b[0];
+  r[1][col] = b[1];
+  r[2][col] = b[2];
+  return r;
+}
+
+function polyeval2(coeffs, x) {
+  return coeffs[0] * x * x + coeffs[1] * x + coeffs[2];
+}
+
+/**
+ * Fit curves to detected text lines, with outlier rejection.
+ * Returns array of fitted line objects.
+ */
+function fitLineCurves(lines, imgWidth) {
+  var margin = imgWidth * DEWARP_MARGIN_FRACTION;
+  var fitted = [];
+
+  for (var li = 0; li < lines.length; li++) {
+    var pts = lines[li].midline;
+
+    // Filter margin points
+    var filtered = [];
+    for (var pi = 0; pi < pts.length; pi++) {
+      if (pts[pi].x > margin && pts[pi].x < imgWidth - margin) {
+        filtered.push(pts[pi]);
+      }
+    }
+    if (filtered.length < 6) continue;
+
+    // First fit
+    var coeffs = polyfit2(filtered);
+    if (!coeffs) continue;
+
+    // Outlier rejection
+    var residuals = [];
+    for (var ri = 0; ri < filtered.length; ri++) {
+      residuals.push(Math.abs(filtered[ri].y - polyeval2(coeffs, filtered[ri].x)));
+    }
+    residuals.sort(function (a, b) { return a - b; });
+    var medRes = residuals[Math.floor(residuals.length / 2)];
+    var threshold = Math.max(medRes * 3, 2.0);
+
+    var inliers = [];
+    for (var ii = 0; ii < filtered.length; ii++) {
+      if (Math.abs(filtered[ii].y - polyeval2(coeffs, filtered[ii].x)) < threshold) {
+        inliers.push(filtered[ii]);
+      }
+    }
+    if (inliers.length < 6) continue;
+
+    // Refit on inliers
+    coeffs = polyfit2(inliers);
+    if (!coeffs) continue;
+
+    // Check fit quality
+    var sumSqRes = 0;
+    for (var si = 0; si < inliers.length; si++) {
+      var r = inliers[si].y - polyeval2(coeffs, inliers[si].x);
+      sumSqRes += r * r;
+    }
+    var rmsRes = Math.sqrt(sumSqRes / inliers.length);
+    if (rmsRes > DEWARP_MAX_FIT_RESIDUAL) continue;
+
+    // Compute ideal y (mean) and curvature
+    var fittedYs = [];
+    for (var fi = 0; fi < inliers.length; fi++) {
+      fittedYs.push(polyeval2(coeffs, inliers[fi].x));
+    }
+    var idealY = 0;
+    for (var mi = 0; mi < fittedYs.length; mi++) idealY += fittedYs[mi];
+    idealY /= fittedYs.length;
+
+    var maxCurv = 0;
+    for (var ci = 0; ci < fittedYs.length; ci++) {
+      var dev = Math.abs(fittedYs[ci] - idealY);
+      if (dev > maxCurv) maxCurv = dev;
+    }
+
+    fitted.push({
+      points: inliers,
+      coeffs: coeffs,
+      fittedYs: fittedYs,
+      idealY: idealY,
+      curvature: maxCurv,
+    });
+  }
+
+  return fitted;
+}
+
+/**
+ * Build a displacement field from fitted text line curves.
+ * Uses column-by-column vertical interpolation between lines (no scipy.griddata needed).
+ *
+ * Returns a Float32Array of vertical displacements, or null if insufficient data.
+ */
+function buildDisplacementField(fittedLines, width, height) {
+  if (fittedLines.length < DEWARP_MIN_LINES) return null;
+
+  // For each column x, collect (y, dy) pairs from all lines
+  // Then interpolate vertically
+  var field = new Float32Array(width * height);
+
+  var step = 2; // Process every 2nd column for speed, interpolate between
+  for (var x = 0; x < width; x += step) {
+    // Collect displacement samples for this x column
+    var samples = []; // { y, dy }
+
+    for (var li = 0; li < fittedLines.length; li++) {
+      var line = fittedLines[li];
+      var pts = line.points;
+      // Check if this x is within the line's range
+      var xMin = pts[0].x;
+      var xMax = pts[pts.length - 1].x;
+
+      if (x >= xMin && x <= xMax) {
+        var fittedY = polyeval2(line.coeffs, x);
+        var dy = line.idealY - fittedY;
+        samples.push({ y: fittedY, dy: dy });
+      }
+    }
+
+    // Sort by y
+    samples.sort(function (a, b) { return a.y - b.y; });
+
+    // Add anchors at top and bottom with zero displacement
+    if (samples.length > 0) {
+      samples.unshift({ y: 0, dy: 0 });
+      samples.push({ y: height - 1, dy: 0 });
+    }
+
+    // Interpolate for each row
+    if (samples.length >= 2) {
+      var si = 0;
+      for (var y = 0; y < height; y++) {
+        // Find bracketing samples
+        while (si < samples.length - 2 && samples[si + 1].y < y) si++;
+
+        var s0 = samples[si];
+        var s1 = samples[Math.min(si + 1, samples.length - 1)];
+
+        var dy;
+        if (s1.y === s0.y) {
+          dy = s0.dy;
+        } else {
+          var t = (y - s0.y) / (s1.y - s0.y);
+          t = Math.max(0, Math.min(1, t));
+          dy = s0.dy + t * (s1.dy - s0.dy);
+        }
+
+        // Fill this column and the next (for step=2)
+        field[y * width + x] = dy;
+        if (x + 1 < width) field[y * width + x + 1] = dy;
+      }
+    }
+  }
+
+  // Simple horizontal smoothing pass (box filter)
+  var radius = Math.min(DEWARP_FIELD_SIGMA_X, Math.floor(width / 4));
+  var temp = new Float32Array(width * height);
+
+  for (var sy = 0; sy < height; sy++) {
+    var runSum = 0;
+    var count = 0;
+
+    // Initialize window
+    for (var wx = 0; wx < Math.min(radius, width); wx++) {
+      runSum += field[sy * width + wx];
+      count++;
+    }
+
+    for (var sx = 0; sx < width; sx++) {
+      // Add right edge
+      var right = sx + radius;
+      if (right < width) {
+        runSum += field[sy * width + right];
+        count++;
+      }
+      // Remove left edge
+      var left = sx - radius - 1;
+      if (left >= 0) {
+        runSum -= field[sy * width + left];
+        count--;
+      }
+
+      temp[sy * width + sx] = runSum / count;
+    }
+  }
+
+  // Vertical smoothing pass
+  var vRadius = Math.min(DEWARP_FIELD_SIGMA_Y, Math.floor(height / 4));
+  for (var vx = 0; vx < width; vx++) {
+    var vRunSum = 0;
+    var vCount = 0;
+
+    for (var vy = 0; vy < Math.min(vRadius, height); vy++) {
+      vRunSum += temp[vy * width + vx];
+      vCount++;
+    }
+
+    for (var vy2 = 0; vy2 < height; vy2++) {
+      var vRight = vy2 + vRadius;
+      if (vRight < height) {
+        vRunSum += temp[vRight * width + vx];
+        vCount++;
+      }
+      var vLeft = vy2 - vRadius - 1;
+      if (vLeft >= 0) {
+        vRunSum -= temp[vLeft * width + vx];
+        vCount--;
+      }
+
+      field[vy2 * width + vx] = vRunSum / vCount;
+    }
+  }
+
+  return field;
+}
+
+/**
+ * Attempt to dewarp a grayscale Mat.
+ * Returns { mat, wasDewarped } where mat is the result (caller must delete).
+ */
+function dewarpMat(gray) {
+  var h = gray.rows;
+  var w = gray.cols;
+
+  // Resize for detection
+  var scale = DEWARP_DETECT_WIDTH / w;
+  var detectH = Math.round(h * scale);
+  var detectGray = new cv.Mat();
+  cv.resize(gray, detectGray, new cv.Size(DEWARP_DETECT_WIDTH, detectH), 0, 0, cv.INTER_AREA);
+
+  // Detect text lines
+  var lines = detectTextLines(detectGray, DEWARP_DETECT_WIDTH, detectH);
+
+  if (lines.length < DEWARP_MIN_LINES) {
+    detectGray.delete();
+    return { mat: gray.clone(), wasDewarped: false };
+  }
+
+  // Fit curves
+  var fitted = fitLineCurves(lines, DEWARP_DETECT_WIDTH);
+
+  if (fitted.length < DEWARP_MIN_LINES) {
+    detectGray.delete();
+    return { mat: gray.clone(), wasDewarped: false };
+  }
+
+  // Check curvature
+  var maxCurv = 0;
+  for (var ci = 0; ci < fitted.length; ci++) {
+    if (fitted[ci].curvature > maxCurv) maxCurv = fitted[ci].curvature;
+  }
+
+  if (maxCurv < DEWARP_MIN_CURVATURE) {
+    detectGray.delete();
+    return { mat: gray.clone(), wasDewarped: false };
+  }
+
+  // Build displacement field at detection scale
+  var dyField = buildDisplacementField(fitted, DEWARP_DETECT_WIDTH, detectH);
+  detectGray.delete();
+
+  if (!dyField) {
+    return { mat: gray.clone(), wasDewarped: false };
+  }
+
+  // Scale displacement field to full resolution
+  // Create small Mat from the field, resize, read back
+  var smallFieldMat = cv.matFromArray(detectH, DEWARP_DETECT_WIDTH, cv.CV_32FC1, dyField);
+  var fullFieldMat = new cv.Mat();
+  cv.resize(smallFieldMat, fullFieldMat, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+  smallFieldMat.delete();
+
+  // Scale the displacement values by inverse scale
+  var invScale = 1.0 / scale;
+
+  // Build remap tables using direct typed array access (much faster than floatAt)
+  var mapX = new cv.Mat(h, w, cv.CV_32FC1);
+  var mapY = new cv.Mat(h, w, cv.CV_32FC1);
+  var mapXData = mapX.data32F;
+  var mapYData = mapY.data32F;
+  var fieldData = fullFieldMat.data32F;
+
+  for (var y = 0; y < h; y++) {
+    var rowOff = y * w;
+    for (var x = 0; x < w; x++) {
+      var idx = rowOff + x;
+      mapXData[idx] = x;
+      mapYData[idx] = y - fieldData[idx] * invScale;
+    }
+  }
+
+  fullFieldMat.delete();
+
+  // Apply remap
+  var dewarped = new cv.Mat();
+  cv.remap(gray, dewarped, mapX, mapY, cv.INTER_LINEAR,
+    cv.BORDER_CONSTANT, new cv.Scalar(255));
+  mapX.delete();
+  mapY.delete();
+
+  return { mat: dewarped, wasDewarped: true };
+}
+
+// ============================================================
+// COMBINED CLEAN + DEWARP
+// ============================================================
+
+/**
+ * Clean and dewarp a page image. Returns JPEG bytes.
+ *
+ * Pipeline:
+ * 1. Convert to grayscale
+ * 2. Dewarp (on the original grayscale, before binarization, for better line detection)
+ * 3. Clean (normalize background, remove bleed-through, binarize)
+ * 4. Encode to JPEG
+ */
+function cleanAndDewarpPage(id, imageData, width, height) {
+  try {
+    var src = cv.matFromImageData({ data: imageData, width: width, height: height });
+
+    // Convert to grayscale
+    var gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    src.delete();
+
+    // Step 1: Dewarp (on grayscale, before cleaning, for better text line detection)
+    var dewarpResult = dewarpMat(gray);
+    gray.delete();
+
+    var dewarped = dewarpResult.mat;
+    var wasDewarped = dewarpResult.wasDewarped;
+
+    // Step 2: Clean the (possibly dewarped) image
+    var cleaned = cleanPageMat(dewarped);
+    dewarped.delete();
+
+    // Convert to RGB for JPEG encoding
+    var rgb = new cv.Mat();
+    cv.cvtColor(cleaned, rgb, cv.COLOR_GRAY2RGB);
+    cleaned.delete();
+
+    var finalWidth = rgb.cols;
+    var finalHeight = rgb.rows;
+
+    // Encode to JPEG
+    encodeToJpeg(rgb, finalWidth, finalHeight, JPEG_QUALITY).then(function (jpegBytes) {
+      rgb.delete();
+
+      postMessage(
+        {
+          type: 'cleanDewarped',
+          id: id,
+          jpeg: jpegBytes,
+          width: finalWidth,
+          height: finalHeight,
+          wasDewarped: wasDewarped,
+        },
+        [jpegBytes.buffer]
+      );
+    });
+  } catch (err) {
+    postMessage({ type: 'error', id: id, message: err.message || String(err) });
+  }
 }

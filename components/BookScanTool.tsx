@@ -6,8 +6,10 @@ import type { SlotData, AppStatus, Progress } from '@/lib/types';
 import { SLOTS_DEFAULT, SLOTS_ADD_STEP } from '@/lib/constants';
 import { naturalSortCompare } from '@/lib/naturalSort';
 import { validatePdf, loadPdfDocument } from '@/lib/pdf/render';
-import { runPipeline, runFixPipeline, runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
+import { runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
 import { runReplacePipeline } from '@/lib/replacePipeline';
+import { runFullfixPipeline } from '@/lib/fullfixPipeline';
+import { runMergeStraightenPipeline } from '@/lib/straightenPipeline';
 import { BookNameInput } from './BookNameInput';
 import { SlotGrid } from './SlotGrid';
 import { FixDropZone } from './FixDropZone';
@@ -15,7 +17,7 @@ import { PageGrid } from './PageGrid';
 import { ProgressPanel } from './ProgressPanel';
 import { ResultPanel } from './ResultPanel';
 
-type ToolMode = 'merge-only' | 'merge' | 'fix' | 'replace';
+type ToolMode = 'merge' | 'fullfix' | 'replace';
 
 function createSlots(count: number, startNumber: number): SlotData[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -35,12 +37,15 @@ export function BookScanTool() {
   // --- Merge mode state ---
   const [bookName, setBookName] = useState('');
   const [slots, setSlots] = useState<SlotData[]>(() => createSlots(SLOTS_DEFAULT, 1));
+  const [mergeStraighten, setMergeStraighten] = useState(false);
 
-  // --- Fix mode state ---
+  // --- Full fix mode state ---
   const [fixFile, setFixFile] = useState<File | null>(null);
   const [fixPageCount, setFixPageCount] = useState<number | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixIsValidating, setFixIsValidating] = useState(false);
+  const [fullfixStraighten, setFullfixStraighten] = useState(false);
+  const [fullfixClean, setFullfixClean] = useState(false);
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -74,6 +79,7 @@ export function BookScanTool() {
     bookName.trim().length > 0 &&
     fixFile !== null &&
     !fixIsValidating &&
+    (fullfixStraighten || fullfixClean) &&
     status === 'idle';
 
   const canStartReplace =
@@ -82,7 +88,7 @@ export function BookScanTool() {
     status === 'idle';
 
   const canStart =
-    mode === 'fix' ? canStartFix :
+    mode === 'fullfix' ? canStartFix :
     mode === 'replace' ? canStartReplace :
     canStartSlots;
 
@@ -90,14 +96,11 @@ export function BookScanTool() {
   const handleModeChange = useCallback(
     (newMode: ToolMode) => {
       if (locked || newMode === mode) return;
-      const wasSlotMode = mode === 'merge-only' || mode === 'merge';
-      const isSlotMode = newMode === 'merge-only' || newMode === 'merge';
       setMode(newMode);
-      // Preserve slots when switching between merge-only and merge
-      if (!wasSlotMode || !isSlotMode) {
+      if (newMode !== 'merge') {
         setSlots(createSlots(SLOTS_DEFAULT, 1));
       }
-      if (newMode !== 'fix') {
+      if (newMode !== 'fullfix') {
         setFixFile(null);
         setFixPageCount(null);
         setFixError(null);
@@ -430,7 +433,7 @@ export function BookScanTool() {
   const handleStart = useCallback(async () => {
     if (!canStart) return;
 
-    if (mode === 'merge-only' || mode === 'merge') {
+    if (mode === 'merge') {
       // Check for empty slots between filled ones
       const filledIndices = slots
         .map((s, i) => (s.file ? i : -1))
@@ -472,15 +475,19 @@ export function BookScanTool() {
       };
 
       let result;
-      if (mode === 'merge-only') {
-        result = await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
-      } else if (mode === 'merge') {
-        result = await runPipeline(slots, bookName, progressCb, cancelRef.current);
+      if (mode === 'merge') {
+        result = mergeStraighten
+          ? await runMergeStraightenPipeline(slots, bookName, progressCb, cancelRef.current)
+          : await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = bookName.trim() || replaceFile!.name.replace(/\.pdf$/i, '');
         result = await runReplacePipeline(replaceFile!, replacements, name, progressCb, cancelRef.current);
       } else {
-        result = await runFixPipeline(fixFile!, bookName, progressCb, cancelRef.current);
+        result = await runFullfixPipeline(
+          fixFile!, bookName,
+          { straighten: fullfixStraighten, clean: fullfixClean },
+          progressCb, cancelRef.current
+        );
       }
 
       // Clean up old URL if any
@@ -501,7 +508,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl]);
+  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeStraighten, fullfixStraighten, fullfixClean]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -539,18 +546,16 @@ export function BookScanTool() {
   const filledCount = slots.filter((s) => s.file !== null).length;
 
   const subtitleText =
-    mode === 'merge-only'
-      ? 'Merge your scanned book pages into one clean PDF'
-      : mode === 'merge'
-        ? 'Straighten and merge your scanned book pages into one clean PDF'
-        : mode === 'replace'
-          ? 'Replace specific pages in an existing PDF'
-          : 'Straighten rotated pages in an existing PDF';
+    mode === 'merge'
+      ? 'Merge your scanned book pages into one PDF'
+      : mode === 'replace'
+        ? 'Replace specific pages in an existing PDF'
+        : 'Straighten, clean, and dewarp your scanned book PDF';
 
   // --- Start button hint ---
   let startHint = '';
   if (!canStart && status === 'idle') {
-    if (mode === 'merge-only' || mode === 'merge') {
+    if (mode === 'merge') {
       if (bookName.trim().length === 0 && !slots.some((s) => s.file !== null)) {
         startHint = 'Enter a book name and add at least one PDF to start.';
       } else if (bookName.trim().length === 0) {
@@ -569,7 +574,9 @@ export function BookScanTool() {
         startHint = 'Click on a page thumbnail to replace it.';
       }
     } else {
-      if (bookName.trim().length === 0 && fixFile === null) {
+      if (!fullfixStraighten && !fullfixClean) {
+        startHint = 'Select at least one option above.';
+      } else if (bookName.trim().length === 0 && fixFile === null) {
         startHint = 'Enter a book name and add a PDF to start.';
       } else if (bookName.trim().length === 0) {
         startHint = 'Enter a book name above to start.';
@@ -619,9 +626,8 @@ export function BookScanTool() {
           }}
         >
           {([
-            { key: 'merge-only' as ToolMode, label: 'Merge Only' },
-            { key: 'merge' as ToolMode, label: 'Merge & Straighten' },
-            { key: 'fix' as ToolMode, label: 'Fix Only' },
+            { key: 'merge' as ToolMode, label: 'Merge' },
+            { key: 'fullfix' as ToolMode, label: 'Full Book Fix' },
             { key: 'replace' as ToolMode, label: 'Replace Pages' },
           ]).map((tab) => (
             <button
@@ -653,7 +659,7 @@ export function BookScanTool() {
       )}
 
       {/* Input area — mode-dependent */}
-      {(mode === 'merge-only' || mode === 'merge') ? (
+      {mode === 'merge' ? (
         <section className="mb-8 sm:mb-10">
           <div className="flex items-center justify-between mb-4">
             <h2
@@ -717,6 +723,40 @@ export function BookScanTool() {
               Add more slots
             </button>
           </div>
+
+          {/* Merge options */}
+          <div
+            className="mt-5 mx-auto p-4 flex flex-col gap-3"
+            style={{
+              maxWidth: '32rem',
+              background: 'var(--color-surface-card)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-lg)',
+            }}
+          >
+            <p
+              className="text-xs font-semibold uppercase tracking-wider"
+              style={{ color: 'var(--color-ink-muted)' }}
+            >
+              Options
+            </p>
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={mergeStraighten}
+                onChange={(e) => setMergeStraighten(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                Straighten pages based on text
+              </span>
+            </label>
+          </div>
         </section>
       ) : mode === 'replace' ? (
         <section className="mb-8 sm:mb-10">
@@ -768,6 +808,55 @@ export function BookScanTool() {
             locked={locked}
             onFileChange={handleFixFileChange}
           />
+
+          {/* Fix options */}
+          <div
+            className="mt-5 p-4 flex flex-col gap-3"
+            style={{
+              background: 'var(--color-surface-card)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-lg)',
+            }}
+          >
+            <p
+              className="text-xs font-semibold uppercase tracking-wider"
+              style={{ color: 'var(--color-ink-muted)' }}
+            >
+              Options
+            </p>
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={fullfixStraighten}
+                onChange={(e) => setFullfixStraighten(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                Straighten pages based on text
+              </span>
+            </label>
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={fullfixClean}
+                onChange={(e) => setFullfixClean(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                Clean &amp; dewarp
+              </span>
+            </label>
+          </div>
         </section>
       )}
 

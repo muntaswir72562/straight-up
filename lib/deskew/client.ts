@@ -11,6 +11,13 @@ export interface StraightenResult {
   croppedHeight: number;
 }
 
+export interface CleanDewarpResult {
+  jpeg: Uint8Array;
+  width: number;
+  height: number;
+  wasDewarped: boolean;
+}
+
 type PendingRequest = {
   resolve: (result: never) => void;
   reject: (error: Error) => void;
@@ -64,7 +71,7 @@ export class DeskewClient {
   private handleMessage(e: MessageEvent) {
     const msg = e.data;
 
-    if (msg.type === 'result' || msg.type === 'straightened' || msg.type === 'error') {
+    if (msg.type === 'result' || msg.type === 'straightened' || msg.type === 'cleanDewarped' || msg.type === 'error') {
       const req = this.pending.get(msg.id);
       if (!req) return;
       this.pending.delete(msg.id);
@@ -81,6 +88,13 @@ export class DeskewClient {
           thumbnail: msg.thumbnail,
           croppedWidth: msg.croppedWidth,
           croppedHeight: msg.croppedHeight,
+        });
+      } else if (msg.type === 'cleanDewarped') {
+        (req.resolve as (r: CleanDewarpResult) => void)({
+          jpeg: msg.jpeg,
+          width: msg.width,
+          height: msg.height,
+          wasDewarped: msg.wasDewarped,
         });
       } else {
         req.reject(new Error(msg.message));
@@ -151,6 +165,38 @@ export class DeskewClient {
           height,
           angle,
           autoCrop,
+        },
+        [buffer]
+      );
+    });
+  }
+
+  /**
+   * Send a page image to the worker for cleaning and dewarping.
+   * Returns the JPEG-encoded cleaned (and possibly dewarped) image.
+   */
+  cleanAndDewarp(
+    imageData: Uint8ClampedArray,
+    width: number,
+    height: number
+  ): Promise<CleanDewarpResult> {
+    if (!this.worker) {
+      return Promise.reject(new Error('Worker not initialized. Call init() first.'));
+    }
+
+    const id = this.nextId++;
+
+    return new Promise<CleanDewarpResult>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (r: never) => void, reject });
+
+      const buffer = imageData.buffer.slice(0);
+      this.worker!.postMessage(
+        {
+          type: 'cleanDewarp',
+          id,
+          imageData: new Uint8ClampedArray(buffer),
+          width,
+          height,
         },
         [buffer]
       );
