@@ -3,7 +3,7 @@ FROM node:20-slim AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm install --ignore-scripts
 
 # --- Stage 2: Build the Next.js app ---
 FROM node:20-slim AS builder
