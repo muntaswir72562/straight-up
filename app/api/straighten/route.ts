@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn, type ChildProcess } from 'child_process';
-import { writeFile, readFile, mkdir } from 'fs/promises';
+import { writeFile, readFile, mkdir, rm } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
+
+/** Time (ms) to keep temp files after job finishes, allowing user to download */
+const CLEANUP_DELAY = 10 * 60 * 1000; // 10 minutes
 
 interface Job {
   tempDir: string;
@@ -71,6 +74,11 @@ export async function POST(req: NextRequest) {
         })
         .catch(() => {});
     }
+    // Clean up temp files and Map entry after a delay (allows time for download)
+    setTimeout(() => {
+      jobs.delete(jobId);
+      rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }, CLEANUP_DELAY);
   });
 
   return NextResponse.json({ jobId });
@@ -111,6 +119,7 @@ export async function DELETE(req: NextRequest) {
 
   try { job.process.kill(); } catch { /* already dead */ }
   jobs.delete(jobId);
+  rm(job.tempDir, { recursive: true, force: true }).catch(() => {});
 
   return NextResponse.json({ cancelled: true });
 }
