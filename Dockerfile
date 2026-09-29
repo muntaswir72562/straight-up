@@ -54,4 +54,4 @@ COPY --from=builder /app/scripts/scanner/ ./scripts/scanner/
 
 EXPOSE 3000
 
-CMD ["node", "--max-old-space-size=4096", "server.js"]
+CMD ["node", "server.js"]

@@ -11,59 +11,42 @@ import { randomUUID } from 'crypto';
 /** Time (ms) to keep temp files after job finishes, allowing user to download */
 const CLEANUP_DELAY = 10 * 60 * 1000; // 10 minutes
 
+interface JobMetadata {
+  bookName: string;
+  straighten: string;
+  clean: string;
+  dewarp: string;
+  v2: string;
+}
+
 interface Job {
   tempDir: string;
-  process: ChildProcess;
+  process: ChildProcess | null;
+  metadata?: JobMetadata;
 }
 
 // Module-level job map (works in dev mode, single process)
 const jobs = new Map<string, Job>();
 
-/** POST — upload PDF and start full fix processing */
-export async function POST(req: NextRequest) {
-  const formData = await req.formData();
-  const file = formData.get('file') as File | null;
-  const bookName = (formData.get('bookName') as string) || 'fixed';
-  const straighten = formData.get('straighten') === '1' ? '1' : '0';
-  const clean = formData.get('clean') === '1' ? '1' : '0';
-  const dewarp = formData.get('dewarp') === '1' ? '1' : '0';
-  const v2 = formData.get('v2') === '1' ? '1' : '0';
+// --- Helpers ---
 
-  if (!file) {
-    return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-  }
+function spawnPython(jobId: string, job: Job): void {
+  const meta = job.metadata;
+  if (!meta) throw new Error('No metadata for job');
 
-  if (straighten === '0' && clean === '0' && dewarp === '0' && v2 === '0') {
-    return NextResponse.json({ error: 'No operations selected' }, { status: 400 });
-  }
-
-  const jobId = randomUUID();
-  const tempDir = join(tmpdir(), `straight-up-fullfix-${jobId}`);
-  await mkdir(tempDir, { recursive: true });
-
-  const inputPath = join(tempDir, 'input.pdf');
-  const outputPath = join(tempDir, 'output.pdf');
-  const progressPath = join(tempDir, 'progress.json');
-
-  // Initial progress
-  await writeFile(
-    progressPath,
-    JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
-  );
-
-  // Stream file to disk without buffering entire PDF in memory
-  const nodeStream = Readable.fromWeb(file.stream() as never);
-  await pipeline(nodeStream, createWriteStream(inputPath));
-
-  // Spawn Python
+  const inputPath = join(job.tempDir, 'input.pdf');
+  const outputPath = join(job.tempDir, 'output.pdf');
+  const progressPath = join(job.tempDir, 'progress.json');
   const scriptPath = join(process.cwd(), 'scripts', 'fullfix_pdf.py');
+
   const py = spawn('python', [
-    scriptPath, inputPath, outputPath, progressPath, bookName, straighten, clean, dewarp, v2,
+    scriptPath, inputPath, outputPath, progressPath,
+    meta.bookName, meta.straighten, meta.clean, meta.dewarp, meta.v2,
   ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
-  jobs.set(jobId, { tempDir, process: py });
+  job.process = py;
 
   py.stderr?.on('data', (data: Buffer) => {
     process.stderr.write(data);
@@ -87,11 +70,146 @@ export async function POST(req: NextRequest) {
     // Clean up temp files and Map entry after a delay (allows time for download)
     setTimeout(() => {
       jobs.delete(jobId);
-      rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      rm(job.tempDir, { recursive: true, force: true }).catch(() => {});
     }, CLEANUP_DELAY);
   });
+}
+
+function extractMetadata(formData: FormData): JobMetadata {
+  return {
+    bookName: (formData.get('bookName') as string) || 'fixed',
+    straighten: formData.get('straighten') === '1' ? '1' : '0',
+    clean: formData.get('clean') === '1' ? '1' : '0',
+    dewarp: formData.get('dewarp') === '1' ? '1' : '0',
+    v2: formData.get('v2') === '1' ? '1' : '0',
+  };
+}
+
+function validateOptions(meta: JobMetadata): boolean {
+  return meta.straighten === '1' || meta.clean === '1' || meta.dewarp === '1' || meta.v2 === '1';
+}
+
+// --- Action: create job (no file yet) ---
+
+async function handleCreate(formData: FormData) {
+  const meta = extractMetadata(formData);
+  if (!validateOptions(meta)) {
+    return NextResponse.json({ error: 'No operations selected' }, { status: 400 });
+  }
+
+  const jobId = randomUUID();
+  const tempDir = join(tmpdir(), `straight-up-fullfix-${jobId}`);
+  await mkdir(tempDir, { recursive: true });
+
+  await writeFile(
+    join(tempDir, 'progress.json'),
+    JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
+  );
+
+  jobs.set(jobId, { tempDir, process: null, metadata: meta });
 
   return NextResponse.json({ jobId });
+}
+
+// --- Action: receive a chunk and append to input.pdf ---
+
+async function handleChunk(formData: FormData) {
+  const jobId = formData.get('jobId') as string | null;
+  const chunk = formData.get('chunk') as File | null;
+
+  if (!jobId || !chunk) {
+    return NextResponse.json({ error: 'Missing jobId or chunk' }, { status: 400 });
+  }
+
+  const job = jobs.get(jobId);
+  if (!job) {
+    return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+  }
+
+  const inputPath = join(job.tempDir, 'input.pdf');
+  const nodeStream = Readable.fromWeb(chunk.stream() as never);
+  await pipeline(nodeStream, createWriteStream(inputPath, { flags: 'a' }));
+
+  return NextResponse.json({ ok: true });
+}
+
+// --- Action: all chunks uploaded, start Python processing ---
+
+async function handleStart(formData: FormData) {
+  const jobId = formData.get('jobId') as string | null;
+  if (!jobId) {
+    return NextResponse.json({ error: 'Missing jobId' }, { status: 400 });
+  }
+
+  const job = jobs.get(jobId);
+  if (!job) {
+    return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+  }
+
+  if (job.process) {
+    return NextResponse.json({ error: 'Job already started' }, { status: 409 });
+  }
+
+  const inputPath = join(job.tempDir, 'input.pdf');
+  if (!existsSync(inputPath)) {
+    return NextResponse.json({ error: 'No file uploaded yet' }, { status: 400 });
+  }
+
+  spawnPython(jobId, job);
+
+  return NextResponse.json({ started: true });
+}
+
+// --- Legacy: single-request upload (backward compat) ---
+
+async function handleLegacyUpload(formData: FormData) {
+  const file = formData.get('file') as File | null;
+  const meta = extractMetadata(formData);
+
+  if (!file) {
+    return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+  }
+  if (!validateOptions(meta)) {
+    return NextResponse.json({ error: 'No operations selected' }, { status: 400 });
+  }
+
+  const jobId = randomUUID();
+  const tempDir = join(tmpdir(), `straight-up-fullfix-${jobId}`);
+  await mkdir(tempDir, { recursive: true });
+
+  await writeFile(
+    join(tempDir, 'progress.json'),
+    JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
+  );
+
+  const inputPath = join(tempDir, 'input.pdf');
+  const nodeStream = Readable.fromWeb(file.stream() as never);
+  await pipeline(nodeStream, createWriteStream(inputPath));
+
+  const job: Job = { tempDir, process: null, metadata: meta };
+  jobs.set(jobId, job);
+  spawnPython(jobId, job);
+
+  return NextResponse.json({ jobId });
+}
+
+// --- POST dispatcher ---
+
+export async function POST(req: NextRequest) {
+  const formData = await req.formData();
+  const action = formData.get('action') as string | null;
+
+  if (!action) {
+    return handleLegacyUpload(formData);
+  }
+
+  switch (action) {
+    case 'create': return handleCreate(formData);
+    case 'chunk':  return handleChunk(formData);
+    case 'start':  return handleStart(formData);
+    default:
+      return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
+  }
 }
 
 /** GET — poll for progress */
@@ -127,7 +245,7 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  try { job.process.kill(); } catch { /* already dead */ }
+  try { if (job.process) job.process.kill(); } catch { /* already dead */ }
   jobs.delete(jobId);
   rm(job.tempDir, { recursive: true, force: true }).catch(() => {});
 

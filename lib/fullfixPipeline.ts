@@ -1,12 +1,17 @@
 import { sanitizeBookName } from './filename';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
 
+/** Upload chunk size — 400 MB */
+const CHUNK_SIZE = 400 * 1024 * 1024;
+
 /**
  * Full Book Fix pipeline — server-side via Python.
  *
- * 1. Uploads the PDF to /api/fullfix with options (straighten, clean)
- * 2. Polls /api/fullfix?id=… for page-by-page progress
- * 3. Downloads the result from /api/fullfix/download?id=…
+ * 1. Creates a job on the server
+ * 2. Uploads the PDF in ~200 MB chunks (File.slice — zero client memory overhead)
+ * 3. Starts processing on the server
+ * 4. Polls /api/fullfix?id=… for page-by-page progress
+ * 5. Downloads the result from /api/fullfix/download?id=…
  */
 export async function runFullfixPipeline(
   file: File,
@@ -15,30 +20,75 @@ export async function runFullfixPipeline(
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
 ): Promise<PipelineResult> {
-  // --- Upload ---
+  // --- Step 1: Create job ---
   onProgress({ phase: 'preparing', current: 0, total: 0 });
 
-  const form = new FormData();
-  form.append('file', file);
-  form.append('bookName', bookName);
-  form.append('straighten', options.straighten ? '1' : '0');
-  form.append('clean', options.clean ? '1' : '0');
-  form.append('dewarp', options.dewarp ? '1' : '0');
-  form.append('v2', options.v2 ? '1' : '0');
+  const createForm = new FormData();
+  createForm.append('action', 'create');
+  createForm.append('bookName', bookName);
+  createForm.append('straighten', options.straighten ? '1' : '0');
+  createForm.append('clean', options.clean ? '1' : '0');
+  createForm.append('dewarp', options.dewarp ? '1' : '0');
+  createForm.append('v2', options.v2 ? '1' : '0');
 
-  const startRes = await fetch('/api/fullfix', { method: 'POST', body: form });
-  if (!startRes.ok) {
-    const msg = await startRes.text();
-    throw new Error(`Upload failed: ${msg}`);
+  const createRes = await fetch('/api/fullfix', { method: 'POST', body: createForm });
+  if (!createRes.ok) {
+    const msg = await createRes.text();
+    throw new Error(`Failed to create job: ${msg}`);
   }
-  const { jobId } = (await startRes.json()) as { jobId: string };
+  const { jobId } = (await createRes.json()) as { jobId: string };
 
   if (cancelRef.cancelled) {
     await fetch(`/api/fullfix?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
     throw new Error('Cancelled');
   }
 
-  // --- Poll for progress ---
+  // --- Step 2: Upload in chunks ---
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  for (let i = 0; i < totalChunks; i++) {
+    if (cancelRef.cancelled) {
+      await fetch(`/api/fullfix?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+      throw new Error('Cancelled');
+    }
+
+    onProgress({ phase: 'preparing', current: i + 1, total: totalChunks });
+
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const blob = file.slice(start, end);
+
+    const chunkForm = new FormData();
+    chunkForm.append('action', 'chunk');
+    chunkForm.append('jobId', jobId);
+    chunkForm.append('chunkIndex', String(i));
+    chunkForm.append('chunk', blob);
+
+    const chunkRes = await fetch('/api/fullfix', { method: 'POST', body: chunkForm });
+    if (!chunkRes.ok) {
+      await fetch(`/api/fullfix?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+      const msg = await chunkRes.text();
+      throw new Error(`Upload failed: ${msg}`);
+    }
+  }
+
+  if (cancelRef.cancelled) {
+    await fetch(`/api/fullfix?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+    throw new Error('Cancelled');
+  }
+
+  // --- Step 3: Start processing ---
+  const startForm = new FormData();
+  startForm.append('action', 'start');
+  startForm.append('jobId', jobId);
+
+  const startRes = await fetch('/api/fullfix', { method: 'POST', body: startForm });
+  if (!startRes.ok) {
+    const msg = await startRes.text();
+    throw new Error(`Failed to start processing: ${msg}`);
+  }
+
+  // --- Step 4: Poll for progress ---
   let totalPages = 0;
 
   // eslint-disable-next-line no-constant-condition
@@ -76,7 +126,7 @@ export async function runFullfixPipeline(
     });
   }
 
-  // --- Download result via native browser download ---
+  // --- Step 5: Download result via native browser download ---
   onProgress({ phase: 'merging', current: totalPages, total: totalPages });
 
   const safeName = sanitizeBookName(bookName);

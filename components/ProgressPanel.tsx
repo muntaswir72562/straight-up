@@ -10,7 +10,7 @@ interface ProgressPanelProps {
 }
 
 const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => string> = {
-  preparing: () => 'Preparing... (loading image tools)',
+  preparing: (c, t) => t > 0 ? `Preparing... (part ${c} of ${t})` : 'Preparing...',
   detecting: (c, t) => `Analysing page ${c} of ${t}...`,
   straightening: (c, t) => `Straightening page ${c} of ${t}...`,
   cleaning: (c, t) => `Cleaning page ${c} of ${t}...`,
@@ -21,7 +21,7 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
 };
 
 export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanelProps) {
-  const isIndeterminate = phase === 'preparing' || phase === 'saving';
+  const isIndeterminate = (phase === 'preparing' && total === 0) || phase === 'saving';
   const percent = isIndeterminate
     ? 0
     : total > 0
