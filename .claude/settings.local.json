@@ -6,7 +6,8 @@
       "Bash(pip install:*)",
       "Bash(python:*)",
       "Bash(dir \"C:\\\\Users\\\\MuntaswirW\\\\straight-up\\\\test scan book\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find:*)"
     ]
   }
 }

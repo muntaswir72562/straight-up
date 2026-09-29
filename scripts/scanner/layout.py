@@ -178,7 +178,24 @@ def text_box(img: np.ndarray, lines: Lines | None = None):
     # number, header/footer rules, short lines), repeating until stable so
     # chains like "rule -> footer" are picked up; isolated specks stay out
     reach = max(6 * lines.xh, 0.05 * max(H, W))
-    items = [e for e in (b, lines.chars, lines.rules) if len(e)]
+    # hair-thin, flat or dash-shaped isolated marks (a 1-px shadow line at the
+    # page edge, a stray dash in a corner) are not content: drop char blobs narrower
+    # than 0.25 or flatter than 0.5 letter heights that have no other char
+    # within 1.5 letter heights. Real narrow glyphs (l, i, 1) and punctuation
+    # sit inside words; a lone page number like "2" is full size.
+    ch = lines.chars
+    if len(ch):
+        thin = ((ch[:, 2] < 0.25 * lines.xh) | (ch[:, 3] < 0.5 * lines.xh)
+                | ((ch[:, 2] > 3 * ch[:, 3]) & (ch[:, 3] < 0.7 * lines.xh)))  # dash-shaped
+        if thin.any():
+            cx, cy = ch[:, 0] + ch[:, 2] / 2, ch[:, 1] + ch[:, 3] / 2
+            keep = np.ones(len(ch), bool)
+            for i in np.nonzero(thin)[0]:
+                d = np.hypot(cx - cx[i], cy - cy[i])
+                d[i] = np.inf
+                keep[i] = d.min() < 1.5 * lines.xh
+            ch = ch[keep]
+    items = [e for e in (b, ch, lines.rules) if len(e)]
     items = np.concatenate(items) if items else np.zeros((0, 4))
     changed = True
     while changed:

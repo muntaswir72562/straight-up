@@ -87,7 +87,7 @@ def _merge_batches(batch_files, output_path, metadata):
 
 # ── Main pipeline ────────────────────────────────────────────────────
 
-def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total):
+def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total, skip_clean_pages=None):
     """Process a single page. Returns (jpeg_bytes, rect) if modified, else None."""
     pnum = idx + 1
     page = doc[idx]
@@ -151,7 +151,8 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total):
             print(f"[fullfix] Page {pnum}/{total}: dewarped={was_dewarped}", file=sys.stderr)
 
     # --- Step 3: Clean (independent, runs after either v2 or legacy path) ---
-    if do_clean and not is_color:
+    page_skip = skip_clean_pages and (idx + 1) in skip_clean_pages
+    if do_clean and not is_color and not page_skip:
         cleaned = clean_page(result)
         del result
         result = cleaned
@@ -173,7 +174,8 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total):
 
 
 def process_pdf(input_path, output_path, progress_file, book_name='fixed',
-                do_straighten=True, do_clean=True, do_dewarp=True, do_v2=False):
+                do_straighten=True, do_clean=True, do_dewarp=True, do_v2=False,
+                skip_clean_pages=None):
     print(f"[fullfix] Opening {input_path}", file=sys.stderr)
     print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}, v2={do_v2}",
           file=sys.stderr)
