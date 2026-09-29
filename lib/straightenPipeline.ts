@@ -2,6 +2,7 @@ import { sanitizeBookName } from './filename';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
 import type { SlotData } from './types';
 import { assemblePdf, type AssemblePage } from './pdf/assemble';
+import { runFullfixPipeline } from './fullfixPipeline';
 
 /**
  * Straighten pipeline — server-side via Python.
@@ -149,4 +150,63 @@ export async function runMergeStraightenPipeline(
   );
 
   return runStraightenPipeline(mergedFile, bookName, onProgress, cancelRef);
+}
+
+/**
+ * Merge & V2 pipeline:
+ * 1. Merge multiple PDF slots into one PDF (JS, client-side)
+ * 2. Upload merged PDF to fullfix with v2 enabled
+ */
+export async function runMergeV2Pipeline(
+  slots: SlotData[],
+  bookName: string,
+  onProgress: (progress: PipelineProgress) => void,
+  cancelRef: { cancelled: boolean }
+): Promise<PipelineResult> {
+  const filledSlots = slots.filter((s) => s.file !== null);
+
+  if (filledSlots.length === 0) {
+    throw new Error('No files to merge.');
+  }
+
+  // --- Phase 1: Merge PDFs (client-side) ---
+  onProgress({ phase: 'merging', current: 0, total: 0 });
+
+  const pdfBytesArray: Uint8Array[] = [];
+  for (const slot of filledSlots) {
+    if (cancelRef.cancelled) throw new Error('Cancelled');
+    const buffer = await slot.file!.arrayBuffer();
+    pdfBytesArray.push(new Uint8Array(buffer));
+  }
+
+  const assemblePages: AssemblePage[] = [];
+  for (let pdfIdx = 0; pdfIdx < pdfBytesArray.length; pdfIdx++) {
+    const slot = filledSlots[pdfIdx];
+    const pageCount = slot.pageCount ?? 0;
+    for (let p = 0; p < pageCount; p++) {
+      assemblePages.push({ kind: 'untouched', pdfIndex: pdfIdx, pageIndex: p });
+    }
+  }
+
+  const merged = await assemblePdf(
+    { pdfs: pdfBytesArray, bookTitle: bookName.trim() },
+    assemblePages,
+    (current, total) => onProgress({ phase: 'merging', current, total }),
+    cancelRef
+  );
+
+  if (cancelRef.cancelled) throw new Error('Cancelled');
+
+  // --- Phase 2: Send merged PDF to fullfix with v2 ---
+  const mergedFile = new File(
+    [merged.buffer as ArrayBuffer],
+    'merged.pdf',
+    { type: 'application/pdf' }
+  );
+
+  return runFullfixPipeline(
+    mergedFile, bookName,
+    { straighten: false, clean: false, dewarp: false, v2: true },
+    onProgress, cancelRef
+  );
 }

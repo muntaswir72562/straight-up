@@ -298,6 +298,9 @@ def process_pdf(input_path, output_path, progress_file, book_name='straightened'
     batch_files.append(last_batch)
     gc.collect()
 
+    # Signal saving phase so the UI doesn't stay stuck at 100%
+    write_progress(progress_file, 'saving', total, total)
+
     print(f"[straighten] Merging {len(batch_files)} batch(es)", file=sys.stderr)
     metadata = {'title': book_name, 'producer': 'Straight Up \u2013 Straighten'}
     _merge_batches(batch_files, output_path, metadata)

@@ -61,8 +61,3 @@ export const CLEAN_RENDER_DPI = 150;
 /** Default fallback filename for clean-only mode */
 export const FALLBACK_CLEAN_FILENAME = 'cleaned';
 
-/** Default fallback filename for manual fix mode */
-export const FALLBACK_MANUALFIX_FILENAME = 'manual-fixed';
-
-/** Width in pixels for the manual fix main preview */
-export const MANUALFIX_PREVIEW_WIDTH = 600;

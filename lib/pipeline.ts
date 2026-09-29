@@ -21,7 +21,7 @@ export interface PipelineResult {
   angles: PageAngleInfo[];
 }
 
-export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'manualfixing' | 'merging';
+export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'merging' | 'saving';
 
 export interface PipelineProgress {
   phase: PipelinePhase;

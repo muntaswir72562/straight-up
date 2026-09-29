@@ -11,7 +11,7 @@ For each page:
   5. Add to output PDF
 
 Usage:
-  python fullfix_pdf.py <input> <output> <progress_file> <book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1]
+  python fullfix_pdf.py <input> <output> <progress_file> <book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1] [v2:0|1]
 
 Progress is written to <progress_file> as JSON after each page:
   {"phase": "fixing", "current": 5, "total": 50}
@@ -87,7 +87,7 @@ def _merge_batches(batch_files, output_path, metadata):
 
 # ── Main pipeline ────────────────────────────────────────────────────
 
-def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
+def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total):
     """Process a single page. Returns (jpeg_bytes, rect) if modified, else None."""
     pnum = idx + 1
     page = doc[idx]
@@ -100,7 +100,7 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
 
     # Detect color pages (covers, illustrations) — skip cleaning/dewarping on these
     is_color = False
-    if (do_clean or do_dewarp) and n_channels >= 3:
+    if (do_clean or do_dewarp or do_v2) and n_channels >= 3:
         hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
         mean_sat = float(np.mean(hsv[:, :, 1]))
         is_color = mean_sat > 20
@@ -117,34 +117,40 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
     modified = False
     result = gray
 
-    # --- Step 1: Straighten ---
-    if do_straighten:
-        h, w = result.shape
-        scale = DETECT_WIDTH / w
-        dh = int(h * scale)
-        small = cv2.resize(result, (DETECT_WIDTH, dh), interpolation=cv2.INTER_AREA)
-        angle, confidence = detect_skew_from_text(small)
-        del small
+    # --- V2 Pipeline (replaces straighten + dewarp when enabled) ---
+    if do_v2 and not is_color:
+        from scanner.scan_page import process_page_v2
+        result = process_page_v2(result, pnum, total)
+        modified = True
+    else:
+        # --- Step 1: Straighten (legacy) ---
+        if do_straighten:
+            h, w = result.shape
+            scale = DETECT_WIDTH / w
+            dh = int(h * scale)
+            small = cv2.resize(result, (DETECT_WIDTH, dh), interpolation=cv2.INTER_AREA)
+            angle, confidence = detect_skew_from_text(small)
+            del small
 
-        if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
-            result = straighten_page(result, angle)
-            modified = True
-            print(f"[fullfix] Page {pnum}/{total}: straightened {angle:.2f}\u00b0 "
-                  f"conf={confidence:.1f}", file=sys.stderr)
-        else:
-            print(f"[fullfix] Page {pnum}/{total}: skew={angle:.2f}\u00b0 "
-                  f"conf={confidence:.1f} \u2014 no straighten needed", file=sys.stderr)
+            if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
+                result = straighten_page(result, angle)
+                modified = True
+                print(f"[fullfix] Page {pnum}/{total}: straightened {angle:.2f}\u00b0 "
+                      f"conf={confidence:.1f}", file=sys.stderr)
+            else:
+                print(f"[fullfix] Page {pnum}/{total}: skew={angle:.2f}\u00b0 "
+                      f"conf={confidence:.1f} \u2014 no straighten needed", file=sys.stderr)
 
-    # --- Step 2: Dewarp ---
-    if do_dewarp and not is_color:
-        dewarped, was_dewarped = dewarp_page(result)
-        del result
-        result = dewarped
-        if was_dewarped:
-            modified = True
-        print(f"[fullfix] Page {pnum}/{total}: dewarped={was_dewarped}", file=sys.stderr)
+        # --- Step 2: Dewarp (legacy) ---
+        if do_dewarp and not is_color:
+            dewarped, was_dewarped = dewarp_page(result)
+            del result
+            result = dewarped
+            if was_dewarped:
+                modified = True
+            print(f"[fullfix] Page {pnum}/{total}: dewarped={was_dewarped}", file=sys.stderr)
 
-    # --- Step 3: Clean ---
+    # --- Step 3: Clean (independent, runs after either v2 or legacy path) ---
     if do_clean and not is_color:
         cleaned = clean_page(result)
         del result
@@ -152,9 +158,9 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
         modified = True
         print(f"[fullfix] Page {pnum}/{total}: cleaned", file=sys.stderr)
 
-    if is_color and (do_clean or do_dewarp):
+    if is_color and (do_clean or do_dewarp or do_v2):
         print(f"[fullfix] Page {pnum}/{total}: color page, "
-              f"skipping clean/dewarp", file=sys.stderr)
+              f"skipping clean/dewarp/v2", file=sys.stderr)
 
     if modified:
         _, jpeg_buf = cv2.imencode('.jpg', result,
@@ -167,9 +173,9 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
 
 
 def process_pdf(input_path, output_path, progress_file, book_name='fixed',
-                do_straighten=True, do_clean=True, do_dewarp=True):
+                do_straighten=True, do_clean=True, do_dewarp=True, do_v2=False):
     print(f"[fullfix] Opening {input_path}", file=sys.stderr)
-    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}",
+    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}, v2={do_v2}",
           file=sys.stderr)
     doc = fitz.open(input_path)
     total = len(doc)
@@ -187,7 +193,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
         write_progress(progress_file, 'fixing', pnum, total)
 
         try:
-            page_result = process_page(doc, idx, do_straighten, do_clean, do_dewarp, total)
+            page_result = process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total)
 
             if page_result is not None:
                 jpeg_bytes, rect = page_result
@@ -226,6 +232,9 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
     batch_files.append(last_batch)
     gc.collect()
 
+    # Signal saving phase so the UI doesn't stay stuck at 100%
+    write_progress(progress_file, 'saving', total, total)
+
     # Merge batches incrementally — only 2 PDFs in memory at a time
     print(f"[fullfix] Merging {len(batch_files)} batch(es)", file=sys.stderr)
     metadata = {'title': book_name, 'producer': 'Straight Up \u2013 Full Fix'}
@@ -240,7 +249,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
 if __name__ == '__main__':
     if len(sys.argv) < 7:
         print("Usage: python fullfix_pdf.py <input> <output> <progress_file> "
-              "<book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1]",
+              "<book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1] [v2:0|1]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -251,13 +260,14 @@ if __name__ == '__main__':
     straighten = sys.argv[5] == '1'
     clean = sys.argv[6] == '1'
     dewarp = sys.argv[7] == '1' if len(sys.argv) > 7 else False
+    v2 = sys.argv[8] == '1' if len(sys.argv) > 8 else False
 
-    if not straighten and not clean and not dewarp:
+    if not straighten and not clean and not dewarp and not v2:
         print("[fullfix] Nothing to do — all options disabled", file=sys.stderr)
         sys.exit(1)
 
     try:
-        process_pdf(inp, out, prog, name, straighten, clean, dewarp)
+        process_pdf(inp, out, prog, name, straighten, clean, dewarp, v2)
     except Exception as e:
         print(f"[fullfix] Fatal: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)

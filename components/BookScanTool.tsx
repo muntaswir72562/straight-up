@@ -2,25 +2,22 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import type { SlotData, AppStatus, Progress, ManualFixSettings } from '@/lib/types';
-import { createEmptyManualFixSettings, hasManualEdits } from '@/lib/types';
+import type { SlotData, AppStatus, Progress } from '@/lib/types';
 import { SLOTS_DEFAULT, SLOTS_ADD_STEP } from '@/lib/constants';
 import { naturalSortCompare } from '@/lib/naturalSort';
 import { validatePdf, loadPdfDocument } from '@/lib/pdf/render';
 import { runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
 import { runReplacePipeline } from '@/lib/replacePipeline';
 import { runFullfixPipeline } from '@/lib/fullfixPipeline';
-import { runManualfixPipeline } from '@/lib/manualfixPipeline';
-import { runMergeStraightenPipeline } from '@/lib/straightenPipeline';
+import { runMergeV2Pipeline } from '@/lib/straightenPipeline';
 import { BookNameInput } from './BookNameInput';
 import { SlotGrid } from './SlotGrid';
 import { FixDropZone } from './FixDropZone';
 import { PageGrid } from './PageGrid';
-import { ManualFixEditor } from './manualfix/ManualFixEditor';
 import { ProgressPanel } from './ProgressPanel';
 import { ResultPanel } from './ResultPanel';
 
-type ToolMode = 'merge' | 'fullfix' | 'replace' | 'manualfix';
+type ToolMode = 'merge' | 'fullfix' | 'replace';
 
 function createSlots(count: number, startNumber: number): SlotData[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -40,7 +37,7 @@ export function BookScanTool() {
   // --- Merge mode state ---
   const [bookName, setBookName] = useState('');
   const [slots, setSlots] = useState<SlotData[]>(() => createSlots(SLOTS_DEFAULT, 1));
-  const [mergeStraighten, setMergeStraighten] = useState(false);
+  const [mergeV2, setMergeV2] = useState(false);
 
   // --- Full fix mode state ---
   const [fixFile, setFixFile] = useState<File | null>(null);
@@ -50,6 +47,7 @@ export function BookScanTool() {
   const [fullfixStraighten, setFullfixStraighten] = useState(false);
   const [fullfixClean, setFullfixClean] = useState(false);
   const [fullfixDewarp, setFullfixDewarp] = useState(false);
+  const [fullfixV2, setFullfixV2] = useState(false);
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -58,16 +56,6 @@ export function BookScanTool() {
   const [replaceIsValidating, setReplaceIsValidating] = useState(false);
   const [replacements, setReplacements] = useState<Map<number, File>>(new Map());
   const [replacePdf, setReplacePdf] = useState<PDFDocumentProxy | null>(null);
-
-  // --- Manual fix mode state ---
-  const [manualfixFile, setManualfixFile] = useState<File | null>(null);
-  const [manualfixPageCount, setManualfixPageCount] = useState<number | null>(null);
-  const [manualfixError, setManualfixError] = useState<string | null>(null);
-  const [manualfixIsValidating, setManualfixIsValidating] = useState(false);
-  const [manualfixPdf, setManualfixPdf] = useState<PDFDocumentProxy | null>(null);
-  const [manualfixSettings, setManualfixSettings] = useState<ManualFixSettings>(
-    createEmptyManualFixSettings(),
-  );
 
   // --- Shared state ---
   const [status, setStatus] = useState<AppStatus>('idle');
@@ -93,7 +81,7 @@ export function BookScanTool() {
     bookName.trim().length > 0 &&
     fixFile !== null &&
     !fixIsValidating &&
-    (fullfixStraighten || fullfixClean || fullfixDewarp) &&
+    (fullfixStraighten || fullfixClean || fullfixDewarp || fullfixV2) &&
     status === 'idle';
 
   const canStartReplace =
@@ -101,18 +89,9 @@ export function BookScanTool() {
     replacements.size > 0 &&
     status === 'idle';
 
-  const canStartManualfix =
-    bookName.trim().length > 0 &&
-    manualfixFile !== null &&
-    !manualfixIsValidating &&
-    manualfixPdf !== null &&
-    hasManualEdits(manualfixSettings) &&
-    status === 'idle';
-
   const canStart =
     mode === 'fullfix' ? canStartFix :
     mode === 'replace' ? canStartReplace :
-    mode === 'manualfix' ? canStartManualfix :
     canStartSlots;
 
   // --- Mode switching ---
@@ -138,17 +117,8 @@ export function BookScanTool() {
         setReplaceIsValidating(false);
         setReplacements(new Map());
       }
-      if (newMode !== 'manualfix') {
-        if (manualfixPdf) manualfixPdf.destroy();
-        setManualfixPdf(null);
-        setManualfixFile(null);
-        setManualfixPageCount(null);
-        setManualfixError(null);
-        setManualfixIsValidating(false);
-        setManualfixSettings(createEmptyManualFixSettings());
-      }
     },
-    [locked, mode, replacePdf, manualfixPdf]
+    [locked, mode, replacePdf]
   );
 
   // --- beforeunload warning ---
@@ -454,78 +424,12 @@ export function BookScanTool() {
     });
   }, []);
 
-  // --- Manual fix mode: File change ---
-  const handleManualfixFileChange = useCallback(
-    (file: File | null) => {
-      if (locked) return;
-
-      if (manualfixPdf) manualfixPdf.destroy();
-      setManualfixPdf(null);
-      setManualfixSettings(createEmptyManualFixSettings());
-
-      if (file === null) {
-        setManualfixFile(null);
-        setManualfixPageCount(null);
-        setManualfixError(null);
-        setManualfixIsValidating(false);
-        return;
-      }
-
-      const isPdf =
-        file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
-
-      if (!isPdf) {
-        setManualfixFile(null);
-        setManualfixPageCount(null);
-        setManualfixError("This file isn't a PDF.");
-        setManualfixIsValidating(false);
-        return;
-      }
-
-      setManualfixFile(file);
-      setManualfixPageCount(null);
-      setManualfixError(null);
-      setManualfixIsValidating(true);
-
-      validatePdf(file)
-        .then((result) => {
-          if (result.valid) {
-            setManualfixPageCount(result.pageCount);
-            setManualfixIsValidating(false);
-            loadPdfDocument(file).then((pdf) => {
-              setManualfixPdf(pdf);
-            }).catch(() => {
-              setManualfixError('Failed to load PDF for preview.');
-            });
-          } else {
-            setManualfixFile(null);
-            setManualfixPageCount(null);
-            setManualfixError(result.error);
-            setManualfixIsValidating(false);
-          }
-        })
-        .catch(() => {
-          setManualfixFile(null);
-          setManualfixPageCount(null);
-          setManualfixError("This PDF can't be opened.");
-          setManualfixIsValidating(false);
-        });
-    },
-    [locked, manualfixPdf],
-  );
-
   // --- Clean up PDFs on unmount ---
   useEffect(() => {
     return () => {
       if (replacePdf) replacePdf.destroy();
     };
   }, [replacePdf]);
-
-  useEffect(() => {
-    return () => {
-      if (manualfixPdf) manualfixPdf.destroy();
-    };
-  }, [manualfixPdf]);
 
   // --- Start processing ---
   const handleStart = useCallback(async () => {
@@ -574,21 +478,16 @@ export function BookScanTool() {
 
       let result;
       if (mode === 'merge') {
-        result = mergeStraighten
-          ? await runMergeStraightenPipeline(slots, bookName, progressCb, cancelRef.current)
+        result = mergeV2
+          ? await runMergeV2Pipeline(slots, bookName, progressCb, cancelRef.current)
           : await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = bookName.trim() || replaceFile!.name.replace(/\.pdf$/i, '');
         result = await runReplacePipeline(replaceFile!, replacements, name, progressCb, cancelRef.current);
-      } else if (mode === 'manualfix') {
-        result = await runManualfixPipeline(
-          manualfixFile!, bookName, manualfixSettings,
-          progressCb, cancelRef.current,
-        );
       } else {
         result = await runFullfixPipeline(
           fixFile!, bookName,
-          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp },
+          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2 },
           progressCb, cancelRef.current
         );
       }
@@ -611,7 +510,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeStraighten, fullfixStraighten, fullfixClean, fullfixDewarp, manualfixFile, manualfixSettings]);
+  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -642,14 +541,7 @@ export function BookScanTool() {
     setReplaceError(null);
     setReplaceIsValidating(false);
     setReplacements(new Map());
-    if (manualfixPdf) manualfixPdf.destroy();
-    setManualfixPdf(null);
-    setManualfixFile(null);
-    setManualfixPageCount(null);
-    setManualfixError(null);
-    setManualfixIsValidating(false);
-    setManualfixSettings(createEmptyManualFixSettings());
-  }, [downloadUrl, replacePdf, manualfixPdf]);
+  }, [downloadUrl, replacePdf]);
 
   // --- Derived values ---
   const totalPages = slots.reduce((sum, s) => sum + (s.pageCount ?? 0), 0);
@@ -660,9 +552,7 @@ export function BookScanTool() {
       ? 'Merge your scanned book pages into one PDF'
       : mode === 'replace'
         ? 'Replace specific pages in an existing PDF'
-        : mode === 'manualfix'
-          ? 'Adjust levels, rotation, and perspective per page'
-          : 'Straighten, clean, and dewarp your scanned book PDF';
+        : 'Straighten, clean, and dewarp your scanned book PDF';
 
   // --- Start button hint ---
   let startHint = '';
@@ -685,20 +575,8 @@ export function BookScanTool() {
       } else if (replacements.size === 0) {
         startHint = 'Click on a page thumbnail to replace it.';
       }
-    } else if (mode === 'manualfix') {
-      if (bookName.trim().length === 0 && manualfixFile === null) {
-        startHint = 'Enter a book name and add a PDF to start.';
-      } else if (bookName.trim().length === 0) {
-        startHint = 'Enter a book name above to start.';
-      } else if (manualfixFile === null) {
-        startHint = 'Add a PDF file to start.';
-      } else if (manualfixIsValidating) {
-        startHint = 'Validating file...';
-      } else if (!hasManualEdits(manualfixSettings)) {
-        startHint = 'Adjust levels or edit a page to start.';
-      }
     } else {
-      if (!fullfixStraighten && !fullfixClean && !fullfixDewarp) {
+      if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2) {
         startHint = 'Select at least one option above.';
       } else if (bookName.trim().length === 0 && fixFile === null) {
         startHint = 'Enter a book name and add a PDF to start.';
@@ -753,7 +631,6 @@ export function BookScanTool() {
             { key: 'merge' as ToolMode, label: 'Merge' },
             { key: 'fullfix' as ToolMode, label: 'Full Book Fix' },
             { key: 'replace' as ToolMode, label: 'Replace Pages' },
-            { key: 'manualfix' as ToolMode, label: 'Manual Fix' },
           ]).map((tab) => (
             <button
               key={tab.key}
@@ -776,8 +653,8 @@ export function BookScanTool() {
         </div>
       </section>
 
-      {/* Book name input (hidden in replace mode once PDF is loaded, and manualfix once editor shown) */}
-      {!(mode === 'replace' && replacePdf) && !(mode === 'manualfix' && manualfixPdf) && (
+      {/* Book name input (hidden in replace mode once PDF is loaded) */}
+      {!(mode === 'replace' && replacePdf) && (
         <section className="mx-auto mb-8 sm:mb-10" style={{ maxWidth: '28rem' }}>
           <BookNameInput value={bookName} onChange={setBookName} disabled={locked} />
         </section>
@@ -871,15 +748,20 @@ export function BookScanTool() {
             >
               <input
                 type="checkbox"
-                checked={mergeStraighten}
-                onChange={(e) => setMergeStraighten(e.target.checked)}
+                checked={mergeV2}
+                onChange={(e) => setMergeV2(e.target.checked)}
                 disabled={locked}
                 className="accent-[var(--color-primary)]"
                 style={{ width: 18, height: 18 }}
               />
-              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
-                Straighten pages based on text
-              </span>
+              <div className="flex flex-col">
+                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                  Straighten & Dewarp v2
+                </span>
+                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                  Advanced: perspective correction, text-line dewarping, column alignment
+                </span>
+              </div>
             </label>
           </div>
         </section>
@@ -914,39 +796,6 @@ export function BookScanTool() {
               locked={locked}
               onReplace={handleReplace}
               onUndoReplace={handleUndoReplace}
-            />
-          )}
-        </section>
-      ) : mode === 'manualfix' ? (
-        <section className="mb-8 sm:mb-10">
-          {/* Before PDF loaded: show drop zone */}
-          {!manualfixPdf && (
-            <div className="mx-auto" style={{ maxWidth: '32rem' }}>
-              <h2
-                className="text-sm font-semibold uppercase tracking-wider mb-4"
-                style={{ color: 'var(--color-ink-muted)' }}
-              >
-                PDF file
-              </h2>
-              <FixDropZone
-                file={manualfixFile}
-                pageCount={manualfixPageCount}
-                error={manualfixError}
-                isValidating={manualfixIsValidating}
-                locked={locked}
-                onFileChange={handleManualfixFileChange}
-              />
-            </div>
-          )}
-
-          {/* After PDF loaded: show editor */}
-          {manualfixPdf && manualfixPageCount && (
-            <ManualFixEditor
-              pdf={manualfixPdf}
-              totalPages={manualfixPageCount}
-              locked={locked}
-              settings={manualfixSettings}
-              onSettingsChange={setManualfixSettings}
             />
           )}
         </section>
@@ -988,15 +837,20 @@ export function BookScanTool() {
             >
               <input
                 type="checkbox"
-                checked={fullfixStraighten}
-                onChange={(e) => setFullfixStraighten(e.target.checked)}
+                checked={fullfixV2}
+                onChange={(e) => setFullfixV2(e.target.checked)}
                 disabled={locked}
                 className="accent-[var(--color-primary)]"
                 style={{ width: 18, height: 18 }}
               />
-              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
-                Straighten pages based on text
-              </span>
+              <div className="flex flex-col">
+                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                  Straighten & Dewarp v2
+                </span>
+                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                  Perspective correction, text-line dewarping, column alignment
+                </span>
+              </div>
             </label>
             <label
               className="flex items-center gap-3 cursor-pointer select-none"
@@ -1011,23 +865,7 @@ export function BookScanTool() {
                 style={{ width: 18, height: 18 }}
               />
               <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
-                Clean
-              </span>
-            </label>
-            <label
-              className="flex items-center gap-3 cursor-pointer select-none"
-              style={{ opacity: locked ? 0.5 : 1 }}
-            >
-              <input
-                type="checkbox"
-                checked={fullfixDewarp}
-                onChange={(e) => setFullfixDewarp(e.target.checked)}
-                disabled={locked}
-                className="accent-[var(--color-primary)]"
-                style={{ width: 18, height: 18 }}
-              />
-              <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
-                Dewarp
+                Clean background
               </span>
             </label>
           </div>

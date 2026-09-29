@@ -11,7 +11,7 @@ import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline
 export async function runFullfixPipeline(
   file: File,
   bookName: string,
-  options: { straighten: boolean; clean: boolean; dewarp: boolean },
+  options: { straighten: boolean; clean: boolean; dewarp: boolean; v2: boolean },
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
 ): Promise<PipelineResult> {
@@ -24,6 +24,7 @@ export async function runFullfixPipeline(
   form.append('straighten', options.straighten ? '1' : '0');
   form.append('clean', options.clean ? '1' : '0');
   form.append('dewarp', options.dewarp ? '1' : '0');
+  form.append('v2', options.v2 ? '1' : '0');
 
   const startRes = await fetch('/api/fullfix', { method: 'POST', body: form });
   if (!startRes.ok) {

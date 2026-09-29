@@ -24,12 +24,13 @@ export async function POST(req: NextRequest) {
   const straighten = formData.get('straighten') === '1' ? '1' : '0';
   const clean = formData.get('clean') === '1' ? '1' : '0';
   const dewarp = formData.get('dewarp') === '1' ? '1' : '0';
+  const v2 = formData.get('v2') === '1' ? '1' : '0';
 
   if (!file) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
 
-  if (straighten === '0' && clean === '0' && dewarp === '0') {
+  if (straighten === '0' && clean === '0' && dewarp === '0' && v2 === '0') {
     return NextResponse.json({ error: 'No operations selected' }, { status: 400 });
   }
 
@@ -54,7 +55,7 @@ export async function POST(req: NextRequest) {
   // Spawn Python
   const scriptPath = join(process.cwd(), 'scripts', 'fullfix_pdf.py');
   const py = spawn('python', [
-    scriptPath, inputPath, outputPath, progressPath, bookName, straighten, clean, dewarp,
+    scriptPath, inputPath, outputPath, progressPath, bookName, straighten, clean, dewarp, v2,
   ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });

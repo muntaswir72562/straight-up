@@ -16,12 +16,13 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
   cleaning: (c, t) => `Cleaning page ${c} of ${t}...`,
   dewarping: (c, t) => `Dewarping page ${c} of ${t}...`,
   fixing: (c, t) => `Fixing page ${c} of ${t}...`,
-  manualfixing: (c, t) => `Applying fixes to page ${c} of ${t}...`,
   merging: (c, t) => `Merging page ${c} of ${t}...`,
+  saving: () => 'Saving PDF...',
 };
 
 export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanelProps) {
-  const percent = phase === 'preparing'
+  const isIndeterminate = phase === 'preparing' || phase === 'saving';
+  const percent = isIndeterminate
     ? 0
     : total > 0
       ? Math.round((current / total) * 100)
@@ -59,7 +60,7 @@ export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanel
         aria-valuemax={total}
         aria-label={`Progress: ${percent}%`}
       >
-        {phase === 'preparing' ? (
+        {isIndeterminate ? (
           <div
             className="h-full animate-pulse"
             style={{
@@ -83,8 +84,8 @@ export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanel
         )}
       </div>
 
-      {/* Percentage (hidden during preparing) */}
-      {phase !== 'preparing' && (
+      {/* Percentage (hidden during indeterminate phases) */}
+      {!isIndeterminate && (
         <p className="text-xs font-mono" style={{ color: 'var(--color-ink-muted)' }}>
           {percent}%
         </p>
