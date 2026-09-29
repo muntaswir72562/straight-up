@@ -17,6 +17,7 @@ interface JobMetadata {
   clean: string;
   dewarp: string;
   v2: string;
+  skipClean: string;
 }
 
 interface Job {
@@ -42,6 +43,7 @@ function spawnPython(jobId: string, job: Job): void {
   const py = spawn('python', [
     scriptPath, inputPath, outputPath, progressPath,
     meta.bookName, meta.straighten, meta.clean, meta.dewarp, meta.v2,
+    meta.skipClean,
   ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -82,6 +84,7 @@ function extractMetadata(formData: FormData): JobMetadata {
     clean: formData.get('clean') === '1' ? '1' : '0',
     dewarp: formData.get('dewarp') === '1' ? '1' : '0',
     v2: formData.get('v2') === '1' ? '1' : '0',
+    skipClean: (formData.get('skipClean') as string) || '',
   };
 }
 

@@ -159,6 +159,9 @@ def process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total, ski
         modified = True
         print(f"[fullfix] Page {pnum}/{total}: cleaned", file=sys.stderr)
 
+    if page_skip:
+        print(f"[fullfix] Page {pnum}/{total}: skipped clean (user excluded)",
+              file=sys.stderr)
     if is_color and (do_clean or do_dewarp or do_v2):
         print(f"[fullfix] Page {pnum}/{total}: color page, "
               f"skipping clean/dewarp/v2", file=sys.stderr)
@@ -177,7 +180,8 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
                 do_straighten=True, do_clean=True, do_dewarp=True, do_v2=False,
                 skip_clean_pages=None):
     print(f"[fullfix] Opening {input_path}", file=sys.stderr)
-    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}, v2={do_v2}",
+    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}, v2={do_v2}"
+          f", skip_clean={skip_clean_pages or 'none'}",
           file=sys.stderr)
     doc = fitz.open(input_path)
     total = len(doc)
@@ -195,7 +199,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
         write_progress(progress_file, 'fixing', pnum, total)
 
         try:
-            page_result = process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total)
+            page_result = process_page(doc, idx, do_straighten, do_clean, do_dewarp, do_v2, total, skip_clean_pages)
 
             if page_result is not None:
                 jpeg_bytes, rect = page_result
@@ -251,7 +255,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
 if __name__ == '__main__':
     if len(sys.argv) < 7:
         print("Usage: python fullfix_pdf.py <input> <output> <progress_file> "
-              "<book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1] [v2:0|1]",
+              "<book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1] [v2:0|1] [skip_clean:1,3,5]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -263,13 +267,21 @@ if __name__ == '__main__':
     clean = sys.argv[6] == '1'
     dewarp = sys.argv[7] == '1' if len(sys.argv) > 7 else False
     v2 = sys.argv[8] == '1' if len(sys.argv) > 8 else False
+    skip_clean_raw = sys.argv[9] if len(sys.argv) > 9 else ''
+    skip_clean = set()
+    if skip_clean_raw:
+        for tok in skip_clean_raw.split(','):
+            tok = tok.strip()
+            if tok.isdigit():
+                skip_clean.add(int(tok))
 
     if not straighten and not clean and not dewarp and not v2:
         print("[fullfix] Nothing to do — all options disabled", file=sys.stderr)
         sys.exit(1)
 
     try:
-        process_pdf(inp, out, prog, name, straighten, clean, dewarp, v2)
+        process_pdf(inp, out, prog, name, straighten, clean, dewarp, v2,
+                    skip_clean or None)
     except Exception as e:
         print(f"[fullfix] Fatal: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)

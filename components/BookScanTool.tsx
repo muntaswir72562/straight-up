@@ -48,6 +48,7 @@ export function BookScanTool() {
   const [fullfixClean, setFullfixClean] = useState(false);
   const [fullfixDewarp, setFullfixDewarp] = useState(false);
   const [fullfixV2, setFullfixV2] = useState(false);
+  const [fullfixSkipClean, setFullfixSkipClean] = useState('');
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -487,7 +488,7 @@ export function BookScanTool() {
       } else {
         result = await runFullfixPipeline(
           fixFile!, bookName,
-          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2 },
+          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined },
           progressCb, cancelRef.current
         );
       }
@@ -510,7 +511,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2]);
+  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -868,6 +869,35 @@ export function BookScanTool() {
                 Clean background
               </span>
             </label>
+            {fullfixClean && (
+              <div className="ml-9">
+                <label
+                  className="flex flex-col gap-1"
+                  style={{ opacity: locked ? 0.5 : 1 }}
+                >
+                  <span className="text-xs" style={{ color: 'var(--color-ink-muted)' }}>
+                    Skip clean on pages (comma-separated)
+                  </span>
+                  <input
+                    type="text"
+                    value={fullfixSkipClean}
+                    onChange={(e) => setFullfixSkipClean(e.target.value)}
+                    disabled={locked}
+                    placeholder="e.g. 1, 3, 5"
+                    className="text-sm px-3 py-1.5"
+                    style={{
+                      background: 'var(--color-surface-inset)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: 'var(--radius-md)',
+                      color: 'var(--color-ink)',
+                      outline: 'none',
+                      width: '100%',
+                      maxWidth: '14rem',
+                    }}
+                  />
+                </label>
+              </div>
+            )}
           </div>
         </section>
       )}
