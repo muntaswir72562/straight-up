@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn, type ChildProcess } from 'child_process';
 import { writeFile, readFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import { createWriteStream, existsSync } from 'fs';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -38,9 +40,9 @@ export async function POST(req: NextRequest) {
     JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
   );
 
-  // Save uploaded file
-  const bytes = await file.arrayBuffer();
-  await writeFile(inputPath, Buffer.from(bytes));
+  // Stream file to disk without buffering entire PDF in memory
+  const nodeStream = Readable.fromWeb(file.stream() as never);
+  await pipeline(nodeStream, createWriteStream(inputPath));
 
   // Spawn Python
   const scriptPath = join(process.cwd(), 'scripts', 'straighten_pdf.py');

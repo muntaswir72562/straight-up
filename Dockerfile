@@ -50,6 +50,7 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/scripts/straighten_pdf.py ./scripts/
 COPY --from=builder /app/scripts/clean_pdf.py ./scripts/
 COPY --from=builder /app/scripts/fullfix_pdf.py ./scripts/
+COPY --from=builder /app/scripts/manualfix_pdf.py ./scripts/
 
 EXPOSE 3000
 

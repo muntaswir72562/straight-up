@@ -35,7 +35,7 @@ except ImportError:
 RENDER_DPI = 200
 DETECT_WIDTH = 1000
 JPEG_QUALITY = 92
-BATCH_SIZE = 50
+BATCH_SIZE = 20
 
 # Skew detection (text-line based)
 MAX_SKEW_ANGLE = 10.0       # max detectable skew (degrees)
@@ -276,6 +276,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='straightened'
             batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
         pages_in_batch += 1
+        gc.collect()
 
         if pages_in_batch >= BATCH_SIZE and pnum < total:
             batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')

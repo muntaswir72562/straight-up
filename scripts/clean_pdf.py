@@ -42,7 +42,7 @@ except ImportError:
 # ── Constants ────────────────────────────────────────────────────────
 RENDER_DPI = 200
 DETECT_WIDTH = 1000
-BATCH_SIZE = 50
+BATCH_SIZE = 20
 MIN_LINE_WIDTH_RATIO = 0.12
 MIN_LINES = 3
 DILATION_H = 50
@@ -99,8 +99,10 @@ def detect_text_lines(gray, width, height):
     dilated = cv2.dilate(binary, h_kern, iterations=2)
     c_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (DILATION_H // 2, 1))
     closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, c_kern)
+    del dilated
 
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    del closed
     min_w = width * MIN_LINE_WIDTH_RATIO
     lines = []
     for cnt in contours:
@@ -227,13 +229,16 @@ def dewarp_page(gray):
 
     # Up-scale field to original resolution, dampen to avoid overcorrection
     full_field = cv2.resize(dy_field, (w, h), interpolation=cv2.INTER_LINEAR) / scale * DEWARP_DAMPING
+    del dy_field
 
     map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
     map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
     map_y = (map_y - full_field).astype(np.float32)
+    del full_field
 
     dewarped = cv2.remap(gray, map_x, map_y, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    del map_x, map_y
     return dewarped, True
 
 
@@ -252,14 +257,18 @@ def clean_page(gray):
 
     # Division normalization (paper tone → white)
     normalized = cv2.divide(blurred, bg, scale=255)
+    del blurred, bg
 
     # Remove bleed-through: morphological opening on inverted image
     # erodes then dilates — removes thin/faint features (bleed-through)
     # while preserving thicker features (actual text)
     inverted = cv2.bitwise_not(normalized)
+    del normalized
     open_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     opened = cv2.morphologyEx(inverted, cv2.MORPH_OPEN, open_kern)
+    del inverted
     no_bleed = cv2.bitwise_not(opened)
+    del opened
 
     # Otsu white-point stretch: Otsu finds the threshold between text and
     # background.  Stretch the range so background becomes white and text
@@ -275,6 +284,7 @@ def clean_page(gray):
         black_pt = float(np.percentile(dark_pixels, 2))
     else:
         black_pt = 0.0
+    del dark_pixels
 
     if white_pt - black_pt < 10:
         white_pt = black_pt + 10
@@ -283,6 +293,7 @@ def clean_page(gray):
         (no_bleed.astype(np.float32) - black_pt) / (white_pt - black_pt) * 255,
         0, 255,
     ).astype(np.uint8)
+    del no_bleed
     return stretched
 
 
@@ -399,6 +410,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
             batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
         pages_in_batch += 1
+        gc.collect()
 
         if pages_in_batch >= BATCH_SIZE and pnum < total:
             batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')

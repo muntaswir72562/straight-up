@@ -16,6 +16,7 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
   cleaning: (c, t) => `Cleaning page ${c} of ${t}...`,
   dewarping: (c, t) => `Dewarping page ${c} of ${t}...`,
   fixing: (c, t) => `Fixing page ${c} of ${t}...`,
+  manualfixing: (c, t) => `Applying fixes to page ${c} of ${t}...`,
   merging: (c, t) => `Merging page ${c} of ${t}...`,
 };
 

@@ -16,23 +16,36 @@ interface Job {
 // Module-level job map (works in dev mode, single process)
 const jobs = new Map<string, Job>();
 
-/** POST — upload PDF and start processing */
+/** POST — upload PDF and start manual fix processing */
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
   const file = formData.get('file') as File | null;
-  const bookName = (formData.get('bookName') as string) || 'cleaned';
+  const bookName = (formData.get('bookName') as string) || 'manual-fixed';
+  const settingsJson = formData.get('settings') as string;
 
   if (!file) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
 
+  if (!settingsJson) {
+    return NextResponse.json({ error: 'No settings provided' }, { status: 400 });
+  }
+
+  // Validate JSON
+  try {
+    JSON.parse(settingsJson);
+  } catch {
+    return NextResponse.json({ error: 'Invalid settings JSON' }, { status: 400 });
+  }
+
   const jobId = randomUUID();
-  const tempDir = join(tmpdir(), `straight-up-clean-${jobId}`);
+  const tempDir = join(tmpdir(), `straight-up-manualfix-${jobId}`);
   await mkdir(tempDir, { recursive: true });
 
   const inputPath = join(tempDir, 'input.pdf');
   const outputPath = join(tempDir, 'output.pdf');
   const progressPath = join(tempDir, 'progress.json');
+  const settingsPath = join(tempDir, 'settings.json');
 
   // Initial progress
   await writeFile(
@@ -40,13 +53,18 @@ export async function POST(req: NextRequest) {
     JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
   );
 
+  // Write settings
+  await writeFile(settingsPath, settingsJson);
+
   // Stream file to disk without buffering entire PDF in memory
   const nodeStream = Readable.fromWeb(file.stream() as never);
   await pipeline(nodeStream, createWriteStream(inputPath));
 
   // Spawn Python
-  const scriptPath = join(process.cwd(), 'scripts', 'clean_pdf.py');
-  const py = spawn('python', [scriptPath, inputPath, outputPath, progressPath, bookName], {
+  const scriptPath = join(process.cwd(), 'scripts', 'manualfix_pdf.py');
+  const py = spawn('python', [
+    scriptPath, inputPath, outputPath, progressPath, settingsPath, bookName,
+  ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
@@ -57,9 +75,8 @@ export async function POST(req: NextRequest) {
   });
 
   py.on('close', (code) => {
-    console.log(`[api/clean] Job ${jobId} exited code=${code}`);
+    console.log(`[api/manualfix] Job ${jobId} exited code=${code}`);
     if (code !== 0 && existsSync(progressPath)) {
-      // If Python didn't write an error phase, write one now
       readFile(progressPath, 'utf8')
         .then((raw) => {
           const p = JSON.parse(raw);

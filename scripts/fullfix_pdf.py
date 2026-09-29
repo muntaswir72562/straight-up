@@ -2,15 +2,16 @@
 """
 Full Book Fix PDF processing pipeline (server-side).
 
-Combines straightening and cleaning/dewarping in a single pass.
+Combines straightening, dewarping, and cleaning in a single pass.
 For each page:
   1. Render at target DPI via pymupdf
   2. (if straighten) Detect skew via text line analysis, rotate to fix
-  3. (if clean) Dewarp curved text lines + clean background/bleed-through
-  4. Add to output PDF
+  3. (if dewarp) Dewarp curved text lines
+  4. (if clean) Clean background/bleed-through
+  5. Add to output PDF
 
 Usage:
-  python fullfix_pdf.py <input> <output> <progress_file> <book_name> <straighten:0|1> <clean:0|1>
+  python fullfix_pdf.py <input> <output> <progress_file> <book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1]
 
 Progress is written to <progress_file> as JSON after each page:
   {"phase": "fixing", "current": 5, "total": 50}
@@ -41,7 +42,7 @@ from clean_pdf import dewarp_page, clean_page
 # ── Constants ────────────────────────────────────────────────────────
 RENDER_DPI = 200
 JPEG_QUALITY = 92
-BATCH_SIZE = 50  # pages per batch before flushing to disk
+BATCH_SIZE = 20  # pages per batch before flushing to disk
 
 
 # ── Progress ─────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ def _merge_batches(batch_files, output_path, metadata):
 
 # ── Main pipeline ────────────────────────────────────────────────────
 
-def process_page(doc, idx, do_straighten, do_clean, total):
+def process_page(doc, idx, do_straighten, do_clean, do_dewarp, total):
     """Process a single page. Returns (jpeg_bytes, rect) if modified, else None."""
     pnum = idx + 1
     page = doc[idx]
@@ -97,9 +98,9 @@ def process_page(doc, idx, do_straighten, do_clean, total):
     rect = page.rect
     del pix
 
-    # Detect color pages (covers, illustrations) — skip cleaning on these
+    # Detect color pages (covers, illustrations) — skip cleaning/dewarping on these
     is_color = False
-    if do_clean and n_channels >= 3:
+    if (do_clean or do_dewarp) and n_channels >= 3:
         hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
         mean_sat = float(np.mean(hsv[:, :, 1]))
         is_color = mean_sat > 20
@@ -134,19 +135,26 @@ def process_page(doc, idx, do_straighten, do_clean, total):
             print(f"[fullfix] Page {pnum}/{total}: skew={angle:.2f}\u00b0 "
                   f"conf={confidence:.1f} \u2014 no straighten needed", file=sys.stderr)
 
-    # --- Step 2: Clean & Dewarp ---
-    if do_clean and not is_color:
+    # --- Step 2: Dewarp ---
+    if do_dewarp and not is_color:
         dewarped, was_dewarped = dewarp_page(result)
         del result
-        cleaned = clean_page(dewarped)
-        del dewarped
+        result = dewarped
+        if was_dewarped:
+            modified = True
+        print(f"[fullfix] Page {pnum}/{total}: dewarped={was_dewarped}", file=sys.stderr)
+
+    # --- Step 3: Clean ---
+    if do_clean and not is_color:
+        cleaned = clean_page(result)
+        del result
         result = cleaned
         modified = True
-        print(f"[fullfix] Page {pnum}/{total}: cleaned, "
-              f"dewarped={was_dewarped}", file=sys.stderr)
-    elif is_color:
+        print(f"[fullfix] Page {pnum}/{total}: cleaned", file=sys.stderr)
+
+    if is_color and (do_clean or do_dewarp):
         print(f"[fullfix] Page {pnum}/{total}: color page, "
-              f"skipping clean", file=sys.stderr)
+              f"skipping clean/dewarp", file=sys.stderr)
 
     if modified:
         _, jpeg_buf = cv2.imencode('.jpg', result,
@@ -159,9 +167,10 @@ def process_page(doc, idx, do_straighten, do_clean, total):
 
 
 def process_pdf(input_path, output_path, progress_file, book_name='fixed',
-                do_straighten=True, do_clean=True):
+                do_straighten=True, do_clean=True, do_dewarp=True):
     print(f"[fullfix] Opening {input_path}", file=sys.stderr)
-    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}", file=sys.stderr)
+    print(f"[fullfix] straighten={do_straighten}, clean={do_clean}, dewarp={do_dewarp}",
+          file=sys.stderr)
     doc = fitz.open(input_path)
     total = len(doc)
     print(f"[fullfix] {total} pages", file=sys.stderr)
@@ -178,7 +187,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
         write_progress(progress_file, 'fixing', pnum, total)
 
         try:
-            page_result = process_page(doc, idx, do_straighten, do_clean, total)
+            page_result = process_page(doc, idx, do_straighten, do_clean, do_dewarp, total)
 
             if page_result is not None:
                 jpeg_bytes, rect = page_result
@@ -194,6 +203,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
             batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
 
         pages_in_batch += 1
+        gc.collect()
 
         # Flush batch to disk to free memory
         if pages_in_batch >= BATCH_SIZE and pnum < total:
@@ -230,7 +240,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='fixed',
 if __name__ == '__main__':
     if len(sys.argv) < 7:
         print("Usage: python fullfix_pdf.py <input> <output> <progress_file> "
-              "<book_name> <straighten:0|1> <clean:0|1>",
+              "<book_name> <straighten:0|1> <clean:0|1> [dewarp:0|1]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -240,13 +250,14 @@ if __name__ == '__main__':
     name = sys.argv[4]
     straighten = sys.argv[5] == '1'
     clean = sys.argv[6] == '1'
+    dewarp = sys.argv[7] == '1' if len(sys.argv) > 7 else False
 
-    if not straighten and not clean:
-        print("[fullfix] Nothing to do — both options disabled", file=sys.stderr)
+    if not straighten and not clean and not dewarp:
+        print("[fullfix] Nothing to do — all options disabled", file=sys.stderr)
         sys.exit(1)
 
     try:
-        process_pdf(inp, out, prog, name, straighten, clean)
+        process_pdf(inp, out, prog, name, straighten, clean, dewarp)
     except Exception as e:
         print(f"[fullfix] Fatal: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
