@@ -19,6 +19,10 @@ from .detect import detect_document
 from .rectify import rectify
 from .dewarp import dewarp
 from .layout import align_columns
+from straighten_pdf import (
+    detect_skew_from_text, straighten_page,
+    DETECT_WIDTH, MIN_SKEW_ANGLE, MIN_SKEW_CONFIDENCE,
+)
 
 
 def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.ndarray:
@@ -55,6 +59,18 @@ def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.n
         print(f"{tag}: dewarped ({dinfo.lines} lines, bend={dinfo.before_px:.1f}px)", file=sys.stderr)
     else:
         print(f"{tag}: dewarp skipped ({dinfo.reason})", file=sys.stderr)
+        # Fallback: if dewarp couldn't run (not enough lines, fit not reliable)
+        # but the page isn't already straight, try legacy deskew
+        if dinfo.reason != "page already straight":
+            fall_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+            fh, fw = fall_gray.shape
+            scale = DETECT_WIDTH / fw
+            small = cv2.resize(fall_gray, (DETECT_WIDTH, int(fh * scale)), interpolation=cv2.INTER_AREA)
+            angle, confidence = detect_skew_from_text(small)
+            if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
+                fall_gray = straighten_page(fall_gray, angle)
+                bgr = cv2.cvtColor(fall_gray, cv2.COLOR_GRAY2BGR)
+                print(f"{tag}: fallback deskew {angle:.2f}° (conf={confidence:.1f})", file=sys.stderr)
 
     # Step 4: RANSAC column alignment
     bgr, ainfo = align_columns(bgr)

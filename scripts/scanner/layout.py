@@ -119,8 +119,16 @@ def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
     return Lines(xh / s, boxes[ok] / s, cb / s, rb / s, eb / s, bb / s, wb / s)
 
 
-def _fit_edge(ys: np.ndarray, xs: np.ndarray, tol: float, min_inliers: int):
-    """Robust x = f(y) through the points that sit ON the column edge."""
+def _fit_edge(ys: np.ndarray, xs: np.ndarray, tol: float, min_inliers: int, side: str = "left"):
+    """Robust x = f(y) through the points that sit ON the column's OUTER edge.
+
+    Pages with hanging indents (article/list numbers sticking out, continuation
+    lines indented by different amounts) have several "edges". Only the outer
+    one is the real margin: a candidate edge is rejected if more than a few
+    lines stick out beyond it (left of a left edge / right of a right edge).
+    Without this, the indent line gets fitted and its change in indent is
+    mistaken for slant, which bends the page.
+    """
     n = len(ys)
     if n < min_inliers:
         return None
@@ -137,7 +145,12 @@ def _fit_edge(ys: np.ndarray, xs: np.ndarray, tol: float, min_inliers: int):
     a = xs[I] - b * ys[I]
     r = np.abs(xs[None, :] - (a[:, None] + b[:, None] * ys[None, :]))
     inl = r < tol
-    cnt = inl.sum(1)
+    signed = xs[None, :] - (a[:, None] + b[:, None] * ys[None, :])
+    beyond = (signed < -tol) if side == "left" else (signed > tol)
+    valid = beyond.sum(1) <= max(1, int(0.08 * n))
+    if not valid.any():
+        return None
+    cnt = np.where(valid, inl.sum(1), -1)
     err = np.where(inl, r, 0).sum(1)
     k = np.lexsort((err, -cnt))[0]  # most inliers, then smallest error
     best, best_cnt = inl[k], int(cnt[k])
@@ -168,21 +181,23 @@ def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarr
     lines = lines or find_lines(img)
     if lines is None or len(lines.boxes) < 5:
         return img, AlignInfo(False, "not enough text lines")
-    b = lines.boxes.astype(np.float64)
-    long_ = b[:, 2] > 0.3 * W  # body-text lines only
-    b = b[long_]
+    allb = lines.boxes.astype(np.float64)
+    b = allb[allb[:, 2] > 0.3 * W]  # body-text lines
     if len(b) < 5:
         return img, AlignInfo(False, "not enough long lines")
     yc = b[:, 1] + b[:, 3] / 2
     left, right = b[:, 0], b[:, 0] + b[:, 2]
     tol = 0.6 * lines.xh
-    # an edge only counts if a clear majority of lines sit on it. Tables of
-    # contents, forms and ragged-right text have no real right edge, and
-    # "straightening" a fake one stretches and cuts rows.
-    fl = _fit_edge(yc, left, tol, max(5, int(0.4 * len(b))))
+    # Left edge: use every line, short ones too. In tables the outer column is
+    # made of short entries ("A.B.C.", "Abbott"); they ARE the left margin.
+    ycl = allb[:, 1] + allb[:, 3] / 2
+    fl = _fit_edge(ycl, allb[:, 0], tol, max(5, int(0.25 * len(allb))), "left")
     if fl is None:
         return img, AlignInfo(False, "no consistent left margin")
-    fr = _fit_edge(yc, right, tol, max(6, int(0.5 * len(b))))
+    # Right edge: long lines only, and a clear majority must sit on it. Tables
+    # of contents, forms and ragged-right text have no real right edge, and
+    # "straightening" a fake one stretches and cuts rows.
+    fr = _fit_edge(yc, right, tol, max(6, int(0.5 * len(b))), "right")
 
     y0, y1 = fl[1]
     ys = np.clip(np.arange(H, dtype=np.float64), y0, y1)  # never extrapolate the fit

@@ -5,6 +5,8 @@ node_modules
 *.md
 test scan book/
 scripts/test_pages/
+__pycache__/
+*.pyc
 scripts/prototype_*.py
 scripts/extract_test_pages.py
 PLAN.md

@@ -19,9 +19,10 @@ export interface PipelineResult {
   filename: string;
   totalPages: number;
   angles: PageAngleInfo[];
+  downloadUrl?: string;
 }
 
-export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'merging' | 'saving';
+export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'merging' | 'saving' | 'ocr';
 
 export interface PipelineProgress {
   phase: PipelinePhase;

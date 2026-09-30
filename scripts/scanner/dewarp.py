@@ -44,6 +44,8 @@ TABLE_SECOND_PASS = True  # table pages (>= 3 traced grid lines): run the correc
 RULE_MIN_W = 0.12  # shortest traced line, as a fraction of the page width (one table column)
 EXTEND_LEADERS = True  # follow dot leaders / end numbers past a line's last letter (see _extend_right)
 USE_PREFIX = True  # sample article numbers / list markers at line starts (see _trace_baselines)
+TRACE_PIECES = True  # also trace short text runs (dates, abbreviations) too short for a full line
+TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
 
@@ -76,7 +78,7 @@ def _trace_baselines(gray: np.ndarray):
     cand = (bh > 3) & (bh < 0.06 * h) & (bw < 0.1 * w) & (area > 6)
     cand &= (x > 2) & (y > 2) & (x + bw < w - 2) & (y + bh < h - 2)
     if cand.sum() < 30:
-        return None, None
+        return None, None, []
     # typical letter height. Ignore marks much smaller than letters first:
     # dot leaders ("......" in contents pages, tables of cases) can outnumber
     # letters and would drag a plain median down to the size of a dot.
@@ -107,10 +109,17 @@ def _trace_baselines(gray: np.ndarray):
     xl = (heights > 0.55 * xh) & (heights < 1.25 * xh)
 
     step = 2.0 * xh
-    traced = []
+    traced, pieces = [], []
     for i in range(1, n2):
         lx, ly, lw, lh, la = st2[i]
         if lw < 0.15 * w:
+            # Short run — too few buckets for a full trace, but it may still
+            # be a date, abbreviation, or label whose curl can be measured.
+            if TRACE_PIECES and lw >= 0.04 * w:
+                m_short = (line_of == i)
+                if m_short.sum() >= 3:
+                    sx, sy = centres[m_short], bottoms[m_short]
+                    pieces.append((sx, sy))
             continue
         thick = la / lw
         if thick > 2.2 * xh or thick < 0.3 * xh:
@@ -174,6 +183,10 @@ def _trace_baselines(gray: np.ndarray):
         if len(pts) < 6:
             continue
         p = np.array(pts)
+        if TRIM_ENDS:
+            p = _trim_ends(p, xh)
+            if len(p) < 6:
+                continue
         # running median of 3 removes single-bucket noise but keeps a real
         # lift at the line end (edge values are replicated, not averaged away)
         yv = p[:, 1]
@@ -192,7 +205,41 @@ def _trace_baselines(gray: np.ndarray):
         traced.append((xs_out, ys_out))
     if TRACE_RULES and table_grid(binv, xh):
         traced += _trace_rules(binv, xh)
-    return traced, xh
+    return traced, xh, pieces
+
+
+def _trim_ends(p: np.ndarray, xh: float) -> np.ndarray:
+    """Drop a first/last baseline sample that jumps off its line.
+
+    The running median below replicates the edge values, so a single stray
+    sample at a line END survives it: e.g. the raised opening quote of
+    '"obtains' (two small marks of x-height size, so they pass as letters,
+    and next to each other, so the per-glyph neighbour test doesn't catch
+    them). One such sample 1 letter height too high bent the whole top-left
+    of a page. A real curl changes gradually, so an end sample is compared
+    with the straight continuation of its two neighbours; off by more than
+    half a letter height -> dropped (repeated, at both ends).
+    """
+    while len(p) >= 4 and abs(p[0, 1] - (2 * p[1, 1] - p[2, 1])) > 0.5 * xh:
+        p = p[1:]
+    while len(p) >= 4 and abs(p[-1, 1] - (2 * p[-2, 1] - p[-3, 1])) > 0.5 * xh:
+        p = p[:-1]
+    return p
+
+
+def _trace_piece(centres_x: np.ndarray, bottoms_y: np.ndarray, xh: float):
+    """Condense a short text run (3-20 glyphs) into a single (x, y) sample.
+
+    With only a handful of glyphs there aren't enough buckets to resolve the
+    shape of the curl across the piece, but the median bottom still tells
+    the field what the baseline height is at this x location — which is
+    exactly what's missing in narrow columns.
+    """
+    if len(centres_x) < 3:
+        return None
+    mx = float(np.median(centres_x))
+    my = float(np.median(bottoms_y))
+    return np.array([mx]), np.array([my])
 
 
 def _trace_rules(binv: np.ndarray, xh: float):
@@ -299,7 +346,7 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
     h, w = gray.shape
 
-    traced, xh = _trace_baselines(gray)
+    traced, xh, pieces = _trace_baselines(gray)
     if not traced or len(traced) < 2:
         return img, DewarpInfo(False, len(traced or []), reason="not enough text lines")
     if len(traced) < 4 and not _few:
@@ -314,6 +361,20 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         finally:
             T_DEG, X_INTERVALS = saved
 
+    n_main = len(traced)
+
+    # Add short text pieces as single-point constraints within the traced range
+    if TRACE_PIECES and pieces:
+        all_ys = np.concatenate([ys for _, ys in traced])
+        y_lo, y_hi = float(all_ys.min()), float(all_ys.max())
+        for sx, sy in pieces:
+            pt = _trace_piece(sx, sy, xh)
+            if pt is None:
+                continue
+            px, py = pt
+            if y_lo <= py[0] <= y_hi:
+                traced.append((px, py))
+
     # Each line must become a horizontal row. Which row? Measured at the SAME
     # reference x for every line (centre of the text span); otherwise a short
     # line (median taken over its left part) and a long line (median at the
@@ -323,7 +384,7 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     # jointly for the field D and one row offset c_i per line, with the gauge
     # D(x_ref, t) = 0, iterating because the basis depends on the rows.
     bends = []
-    for xs, ys in traced:
+    for xs, ys in traced[:n_main]:
         bends.append(float(np.abs(ys - np.median(ys)).max()))
     X = np.concatenate([xs for xs, _ in traced])
     Y = np.concatenate([ys for _, ys in traced])
@@ -368,9 +429,10 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
 
     before = float(np.percentile(bends, 90))
     before_rms = float(np.sqrt(np.mean(np.concatenate(
-        [ys - np.median(ys) for _, ys in traced]) ** 2)))
-    after = float(np.sqrt(np.mean(resid ** 2)))
-    info = DewarpInfo(True, len(traced), before / s, after / s,
+        [ys - np.median(ys) for _, ys in traced[:n_main]]) ** 2)))
+    main_mask = line_id < n_main
+    after = float(np.sqrt(np.mean(resid[main_mask] ** 2)))
+    info = DewarpInfo(True, n_main, before / s, after / s,
                       debug_lines=[(xs / s, ys / s) for xs, ys in traced])
     if before < 0.2 * xh:
         info.applied, info.reason = False, "page already straight"

@@ -18,6 +18,9 @@ interface JobMetadata {
   dewarp: string;
   v2: string;
   skipClean: string;
+  ocr: string;
+  skipStraighten: string;
+  skipDewarp: string;
 }
 
 interface Job {
@@ -43,7 +46,7 @@ function spawnPython(jobId: string, job: Job): void {
   const py = spawn('python', [
     scriptPath, inputPath, outputPath, progressPath,
     meta.bookName, meta.straighten, meta.clean, meta.dewarp, meta.v2,
-    meta.skipClean,
+    meta.skipClean, meta.ocr, meta.skipStraighten, meta.skipDewarp,
   ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -85,11 +88,14 @@ function extractMetadata(formData: FormData): JobMetadata {
     dewarp: formData.get('dewarp') === '1' ? '1' : '0',
     v2: formData.get('v2') === '1' ? '1' : '0',
     skipClean: (formData.get('skipClean') as string) || '',
+    ocr: formData.get('ocr') === '1' ? '1' : '0',
+    skipStraighten: (formData.get('skipStraighten') as string) || '',
+    skipDewarp: (formData.get('skipDewarp') as string) || '',
   };
 }
 
 function validateOptions(meta: JobMetadata): boolean {
-  return meta.straighten === '1' || meta.clean === '1' || meta.dewarp === '1' || meta.v2 === '1';
+  return meta.straighten === '1' || meta.clean === '1' || meta.dewarp === '1' || meta.v2 === '1' || meta.ocr === '1';
 }
 
 // --- Action: create job (no file yet) ---
@@ -247,6 +253,9 @@ export async function DELETE(req: NextRequest) {
   if (!job) {
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
+
+  // Write cancel sentinel file (cooperative cancellation for OCR pool workers)
+  await writeFile(join(job.tempDir, '_cancel'), '').catch(() => {});
 
   try { if (job.process) job.process.kill(); } catch { /* already dead */ }
   jobs.delete(jobId);

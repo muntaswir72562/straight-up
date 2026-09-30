@@ -25,16 +25,22 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# Install Python and pip
+# Install Python, pip, and Tesseract OCR
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       python3 \
       python3-pip \
       python3-venv \
       libgl1 \
-      libglib2.0-0 && \
+      libglib2.0-0 \
+      tesseract-ocr && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python3 /usr/bin/python
+
+# Download tessdata_best models for OCR accuracy
+ADD https://github.com/tesseract-ocr/tessdata_best/raw/main/fra.traineddata /opt/tessdata/
+ADD https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata /opt/tessdata/
+ENV TESSDATA_PREFIX=/opt/tessdata OMP_THREAD_LIMIT=1
 
 # Install Python dependencies
 COPY scripts/requirements.txt /tmp/requirements.txt
@@ -51,6 +57,7 @@ COPY --from=builder /app/scripts/straighten_pdf.py ./scripts/
 COPY --from=builder /app/scripts/clean_pdf.py ./scripts/
 COPY --from=builder /app/scripts/fullfix_pdf.py ./scripts/
 COPY --from=builder /app/scripts/scanner/ ./scripts/scanner/
+COPY --from=builder /app/scripts/ocr/ ./scripts/ocr/
 
 EXPOSE 3000
 

@@ -49,6 +49,9 @@ export function BookScanTool() {
   const [fullfixDewarp, setFullfixDewarp] = useState(false);
   const [fullfixV2, setFullfixV2] = useState(false);
   const [fullfixSkipClean, setFullfixSkipClean] = useState('1');
+  const [fullfixSkipStraighten, setFullfixSkipStraighten] = useState('');
+  const [fullfixSkipDewarp, setFullfixSkipDewarp] = useState('');
+  const [fullfixOcr, setFullfixOcr] = useState(false);
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -82,7 +85,7 @@ export function BookScanTool() {
     bookName.trim().length > 0 &&
     fixFile !== null &&
     !fixIsValidating &&
-    (fullfixStraighten || fullfixClean || fullfixDewarp || fullfixV2) &&
+    (fullfixStraighten || fullfixClean || fullfixDewarp || fullfixV2 || fullfixOcr) &&
     status === 'idle';
 
   const canStartReplace =
@@ -488,15 +491,15 @@ export function BookScanTool() {
       } else {
         result = await runFullfixPipeline(
           fixFile!, bookName,
-          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined },
+          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined },
           progressCb, cancelRef.current
         );
       }
 
       // Clean up old URL if any
-      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+      if (downloadUrl && downloadUrl.startsWith('blob:')) URL.revokeObjectURL(downloadUrl);
 
-      const url = URL.createObjectURL(result.blob);
+      const url = result.downloadUrl ?? URL.createObjectURL(result.blob);
       setDownloadUrl(url);
       setDownloadFilename(result.filename);
       setResultTotalPages(result.totalPages);
@@ -511,7 +514,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean]);
+  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -520,7 +523,7 @@ export function BookScanTool() {
 
   // --- Start over ---
   const handleStartOver = useCallback(() => {
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    if (downloadUrl && downloadUrl.startsWith('blob:')) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(null);
     setDownloadFilename('');
     setResultTotalPages(0);
@@ -577,7 +580,7 @@ export function BookScanTool() {
         startHint = 'Click on a page thumbnail to replace it.';
       }
     } else {
-      if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2) {
+      if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2 && !fullfixOcr) {
         startHint = 'Select at least one option above.';
       } else if (bookName.trim().length === 0 && fixFile === null) {
         startHint = 'Enter a book name and add a PDF to start.';
@@ -853,6 +856,35 @@ export function BookScanTool() {
                 </span>
               </div>
             </label>
+            {fullfixV2 && (
+              <div className="ml-9">
+                <label
+                  className="flex flex-col gap-1"
+                  style={{ opacity: locked ? 0.5 : 1 }}
+                >
+                  <span className="text-xs" style={{ color: 'var(--color-ink-muted)' }}>
+                    Skip straighten/dewarp on pages (comma-separated)
+                  </span>
+                  <input
+                    type="text"
+                    value={fullfixSkipStraighten}
+                    onChange={(e) => setFullfixSkipStraighten(e.target.value)}
+                    disabled={locked}
+                    placeholder="e.g. 1, 3, 5"
+                    className="text-sm px-3 py-1.5"
+                    style={{
+                      background: 'var(--color-surface-inset)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: 'var(--radius-md)',
+                      color: 'var(--color-ink)',
+                      outline: 'none',
+                      width: '100%',
+                      maxWidth: '14rem',
+                    }}
+                  />
+                </label>
+              </div>
+            )}
             <label
               className="flex items-center gap-3 cursor-pointer select-none"
               style={{ opacity: locked ? 0.5 : 1 }}
@@ -898,6 +930,27 @@ export function BookScanTool() {
                 </label>
               </div>
             )}
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={fullfixOcr}
+                onChange={(e) => setFullfixOcr(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <div className="flex flex-col">
+                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                  OCR (text recognition)
+                </span>
+                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                  Extract searchable text from scanned pages
+                </span>
+              </div>
+            </label>
           </div>
         </section>
       )}
@@ -962,6 +1015,7 @@ export function BookScanTool() {
             totalPages={resultTotalPages}
             downloadUrl={downloadUrl}
             angles={resultAngles}
+            ocrEnabled={mode === 'fullfix' && fullfixOcr}
             onStartOver={handleStartOver}
           />
         </section>

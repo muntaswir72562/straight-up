@@ -18,6 +18,7 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
   fixing: (c, t) => `Fixing page ${c} of ${t}...`,
   merging: (c, t) => `Merging page ${c} of ${t}...`,
   saving: () => 'Saving PDF...',
+  ocr: (c, t) => `OCR page ${c} of ${t}...`,
 };
 
 export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanelProps) {

@@ -38,6 +38,8 @@ except ImportError:
     print("Error: scipy required. Install: pip install scipy", file=sys.stderr)
     sys.exit(1)
 
+from fullfix_pdf import is_color_page
+
 
 # ── Constants ────────────────────────────────────────────────────────
 RENDER_DPI = 200
@@ -357,10 +359,7 @@ def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
             # Detect color pages (covers, illustrations) and skip them
             is_color = False
             if n_channels >= 3:
-                hsv = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2HSV)
-                mean_sat = float(np.mean(hsv[:, :, 1]))
-                is_color = mean_sat > 20
-                del hsv
+                is_color = is_color_page(img[:, :, :3])
 
             if is_color:
                 print(f"[clean-pdf] Page {pnum}/{total}: color page, copying as-is",

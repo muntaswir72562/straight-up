@@ -16,7 +16,7 @@ const CHUNK_SIZE = 400 * 1024 * 1024;
 export async function runFullfixPipeline(
   file: File,
   bookName: string,
-  options: { straighten: boolean; clean: boolean; dewarp: boolean; v2: boolean; skipClean?: string },
+  options: { straighten: boolean; clean: boolean; dewarp: boolean; v2: boolean; skipClean?: string; ocr?: boolean; skipStraighten?: string; skipDewarp?: string },
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
 ): Promise<PipelineResult> {
@@ -32,6 +32,13 @@ export async function runFullfixPipeline(
   createForm.append('v2', options.v2 ? '1' : '0');
   if (options.skipClean) {
     createForm.append('skipClean', options.skipClean);
+  }
+  createForm.append('ocr', options.ocr ? '1' : '0');
+  if (options.skipStraighten) {
+    createForm.append('skipStraighten', options.skipStraighten);
+  }
+  if (options.skipDewarp) {
+    createForm.append('skipDewarp', options.skipDewarp);
   }
 
   const createRes = await fetch('/api/fullfix', { method: 'POST', body: createForm });
@@ -147,5 +154,6 @@ export async function runFullfixPipeline(
     filename: `${safeName}.pdf`,
     totalPages,
     angles: [],
+    downloadUrl,
   };
 }

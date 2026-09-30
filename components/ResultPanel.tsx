@@ -8,14 +8,17 @@ interface ResultPanelProps {
   totalPages: number;
   downloadUrl: string;
   angles: PageAngleInfo[];
+  ocrEnabled?: boolean;
   onStartOver: () => void;
 }
 
-export function ResultPanel({ filename, totalPages, downloadUrl, angles, onStartOver }: ResultPanelProps) {
+export function ResultPanel({ filename, totalPages, downloadUrl, angles, ocrEnabled, onStartOver }: ResultPanelProps) {
   const [showAngles, setShowAngles] = useState(false);
 
   const straightened = angles.filter((a) => a.straightened).length;
   const alreadyStraight = angles.length - straightened;
+
+  const hasSidecar = ocrEnabled && downloadUrl.startsWith('/api/');
 
   return (
     <div
@@ -67,6 +70,7 @@ export function ResultPanel({ filename, totalPages, downloadUrl, angles, onStart
                 {' '}&middot; {straightened} straightened &middot; {alreadyStraight} already straight
               </>
             )}
+            {ocrEnabled && <>{' '}&middot; searchable text embedded</>}
           </p>
         </div>
 
@@ -107,6 +111,52 @@ export function ResultPanel({ filename, totalPages, downloadUrl, angles, onStart
           </svg>
           Download {filename}
         </a>
+
+        {/* OCR sidecar download buttons */}
+        {hasSidecar && (
+          <div className="w-full flex gap-2" style={{ marginTop: '-0.5rem' }}>
+            <a
+              href={`${downloadUrl}&type=txt`}
+              download={filename.replace(/\.pdf$/i, '_ocr.txt')}
+              className="focus-ring flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors"
+              style={{
+                background: 'var(--color-surface-inset)',
+                border: '1.5px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--color-ink-muted)',
+                textDecoration: 'none',
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+              </svg>
+              OCR Text
+            </a>
+            <a
+              href={`${downloadUrl}&type=json`}
+              download={filename.replace(/\.pdf$/i, '_ocr.json')}
+              className="focus-ring flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors"
+              style={{
+                background: 'var(--color-surface-inset)',
+                border: '1.5px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--color-ink-muted)',
+                textDecoration: 'none',
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="16 18 22 12 16 6"/>
+                <polyline points="8 6 2 12 8 18"/>
+              </svg>
+              OCR Data
+            </a>
+          </div>
+        )}
 
         {/* Action buttons */}
         <div className="flex items-center gap-3">
