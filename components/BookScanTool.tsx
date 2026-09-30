@@ -48,7 +48,7 @@ export function BookScanTool() {
   const [fullfixClean, setFullfixClean] = useState(false);
   const [fullfixDewarp, setFullfixDewarp] = useState(false);
   const [fullfixV2, setFullfixV2] = useState(false);
-  const [fullfixSkipClean, setFullfixSkipClean] = useState('');
+  const [fullfixSkipClean, setFullfixSkipClean] = useState('1');
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);

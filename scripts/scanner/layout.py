@@ -20,6 +20,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .dewarp import table_grid
+
 
 @dataclass
 class Lines:
@@ -28,6 +30,11 @@ class Lines:
     chars: np.ndarray    # (m, 4) x, y, w, h of character blobs (full res)
     rules: np.ndarray    # (k, 4) horizontal rules (header/footer lines, table rules)
     edge_chars: np.ndarray = None  # char-sized blobs cut by the photo border (kept, never used for layout)
+    big: np.ndarray = None  # heading-sized glyphs (2.5-8 x letter height) that sit in words; only used for framing
+    words: np.ndarray = None  # short words (1.2-3 x letter height wide: "580/3", "PARA"); only used for framing
+
+
+TABLE_LINES = True  # detect table grid lines (horizontal + vertical) for framing
 
 
 def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
@@ -51,7 +58,12 @@ def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
     cand &= inside
     if cand.sum() < 30:
         return None
-    xh = float(np.median(bh[cand]))
+    # typical letter height. Ignore marks much smaller than letters first:
+    # dot leaders ("......" in contents pages, tables of cases) can outnumber
+    # letters and would drag a plain median down to the size of a dot.
+    _h = bh[cand]
+    _big = _h >= 0.6 * np.percentile(_h, 75)
+    xh = float(np.median(_h[_big])) if _big.sum() >= 20 else float(np.median(_h))
     keep = cand & (bh < 2.5 * xh) & (bh > 0.35 * xh)
     lut = np.zeros(n, np.uint8)
     lut[1:][keep] = 255
@@ -69,9 +81,42 @@ def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
     # (use mean stroke thickness, not bbox height: a slightly tilted rule has a tall bbox)
     is_rule = inside & (bw > 0.2 * w) & (area / np.maximum(bw, 1) < max(3, 0.6 * xh)) & (bh < 3 * xh)
     rb = np.stack([x, y, bw, bh], 1)[is_rule]
+    # Table grid lines: a table's grid is ONE connected shape, so the size
+    # test above never sees its lines. Pull straight horizontal and vertical
+    # strokes out by shape (morphological opening with a long thin kernel)
+    # and add each as a rule box. Framing/protection only.
+    if TABLE_LINES:
+        extra = [tuple(e) for e in table_grid(binv, xh)]
+        if extra:
+            rb = np.concatenate([rb, np.array(extra, dtype=rb.dtype)]) if len(rb) else np.array(extra, dtype=np.int64)
     sized = (bh < 2.5 * xh) & (bw < 3 * xh) & (area > 6)
     eb = np.stack([x, y, bw, bh], 1)[sized & ~inside]
-    return Lines(xh / s, boxes[ok] / s, cb / s, rb / s, eb / s)
+    # heading letters ("TABLE OF CASES") are taller than the 2.5 x letter
+    # height cut-off for text, so collect them separately for framing. Only
+    # keep ones that sit in a word (another big glyph of similar height next
+    # to them), so a lone shadow or blot doesn't count.
+    bigm = inside & (bh >= 2.5 * xh) & (bh < 8 * xh) & (bw < 0.1 * w) & ~is_rule & (area > 0.15 * bw * bh)
+    bb = np.stack([x, y, bw, bh], 1)[bigm].astype(np.float64)
+    if len(bb):
+        bcx, bcy = bb[:, 0] + bb[:, 2] / 2, bb[:, 1] + bb[:, 3] / 2
+        okb = np.zeros(len(bb), bool)
+        for j in range(len(bb)):
+            dx = np.abs(bcx - bcx[j]); dy = np.abs(bcy - bcy[j])
+            sim = (dx < 1.5 * bb[j, 3]) & (dy < 0.5 * bb[j, 3]) & (np.abs(bb[:, 3] - bb[j, 3]) < 0.4 * bb[j, 3])
+            sim[j] = False
+            okb[j] = sim.any()
+        bb = bb[okb]
+    # heading lines: joined like text lines but thicker than body text allows
+    # (bold / large type). Framing only; never used for column fitting.
+    head = (boxes[:, 2] > 3 * xh) & (thick >= 2.2 * xh) & (thick < 6 * xh)
+    hb = boxes[head].astype(np.float64)
+    bb = np.concatenate([bb, hb]) if len(bb) else hb
+    # short words, too short to count as text lines ("580/3" at the end of a
+    # dot leader): framing only
+    wmask = (boxes[:, 2] > 1.2 * xh) & (boxes[:, 2] <= 3 * xh) & (thick < 2.2 * xh) & (thick > 0.3 * xh) \
+        & (boxes[:, 3] < 2.5 * xh)
+    wb = boxes[wmask].astype(np.float64)
+    return Lines(xh / s, boxes[ok] / s, cb / s, rb / s, eb / s, bb / s, wb / s)
 
 
 def _fit_edge(ys: np.ndarray, xs: np.ndarray, tol: float, min_inliers: int):
@@ -177,7 +222,11 @@ def text_box(img: np.ndarray, lines: Lines | None = None):
     # grow to include page furniture near the block (running header, page
     # number, header/footer rules, short lines), repeating until stable so
     # chains like "rule -> footer" are picked up; isolated specks stay out
-    reach = max(6 * lines.xh, 0.05 * max(H, W))
+    # Header/footer furniture sits above/below the block, so reach far
+    # vertically; nothing real sits far out in the side margins (only specks
+    # on the page edge), so reach only a little sideways.
+    reach_v = max(6 * lines.xh, 0.05 * max(H, W))
+    reach_h = 1.5 * lines.xh
     # hair-thin, flat or dash-shaped isolated marks (a 1-px shadow line at the
     # page edge, a stray dash in a corner) are not content: drop char blobs narrower
     # than 0.25 or flatter than 0.5 letter heights that have no other char
@@ -190,20 +239,53 @@ def text_box(img: np.ndarray, lines: Lines | None = None):
         if thin.any():
             cx, cy = ch[:, 0] + ch[:, 2] / 2, ch[:, 1] + ch[:, 3] / 2
             keep = np.ones(len(ch), bool)
+            real = ~thin  # a stray mark is kept only next to a REAL glyph,
+            # not next to another sliver (a column of 1-px slivers is the
+            # shadow of the page edge, each one "confirming" the next)
             for i in np.nonzero(thin)[0]:
-                d = np.hypot(cx - cx[i], cy - cy[i])
-                d[i] = np.inf
+                if not real.any():
+                    keep[i] = False
+                    continue
+                d = np.hypot(cx[real] - cx[i], cy[real] - cy[i])
                 keep[i] = d.min() < 1.5 * lines.xh
             ch = ch[keep]
-    items = [e for e in (b, ch, lines.rules) if len(e)]
-    items = np.concatenate(items) if items else np.zeros((0, 4))
+    # Whole words/lines, rules and headings may sit further away (a title
+    # above a big gap on a title-style page); single loose marks only get the
+    # normal reach, so specks near the page edge still stay out.
+    reach_far = max(reach_v, 0.08 * max(H, W))
+    wd = lines.words if lines.words is not None else np.zeros((0, 4))
+    groups = [(b, reach_far), (wd, reach_far), (ch, reach_v), (lines.rules, reach_far), (lines.big, reach_far)]
+    groups = [(e, r) for e, r in groups if e is not None and len(e)]
+    items = np.concatenate([e for e, _ in groups]) if groups else np.zeros((0, 4))
+    reaches = np.concatenate([np.full(len(e), r) for e, r in groups]) if groups else np.zeros(0)
+    # Words on the SAME ROW as a body line belong to the page even across a
+    # wide gap (a right-hand column of page/paragraph numbers behind dot
+    # leaders, whose dots are too small to count as text). Only whole words
+    # (line boxes), never loose marks, and only when level with a body line.
+    is_word = np.concatenate([np.full(len(e), (e is b) or (e is wd)) for e, _ in groups]) if groups else np.zeros(0, bool)
+    same_row = np.zeros(len(items), bool)
+    for j in np.nonzero(is_word)[0]:
+        by_, bh_ = items[j, 1], items[j, 3]
+        ov = np.minimum(core[:, 1] + core[:, 3], by_ + bh_) - np.maximum(core[:, 1], by_)
+        same_row[j] = bool((ov > 0.5 * bh_).any())
     changed = True
     while changed:
         changed = False
-        for bx, by, bw, bh in items:
+        for (bx, by, bw, bh), rv, row in zip(items, reaches, same_row):
             if bx >= x0 and by >= y0 and bx + bw <= x1 and by + bh <= y1:
                 continue
-            if bx < x1 + reach and bx + bw > x0 - reach and by < y1 + reach and by + bh > y0 - reach:
+            if bw > 0.2 * W:
+                # long strokes (rules): a printed rule runs along the text
+                # column; a line that mostly sticks out past it is the edge of
+                # another page or a shadow, not page content
+                # (a rule at least 60% as wide as the text block is a printed
+                # rule even if it runs wider than the text, as full-width
+                # header/footer rules do on pages whose text is indented)
+                stick_out = max(0.0, x0 - bx) + max(0.0, bx + bw - x1)
+                if bw < 0.6 * (x1 - x0) and stick_out > max(3 * lines.xh, 0.05 * bw):
+                    continue
+            rh = W if row else reach_h
+            if bx < x1 + rh and bx + bw > x0 - rh and by < y1 + rv and by + bh > y0 - rv:
                 x0, y0 = min(x0, bx), min(y0, by)
                 x1, y1 = max(x1, bx + bw), max(y1, by + bh)
                 changed = True
@@ -225,13 +307,27 @@ def frame(img: np.ndarray, box, margin: float = 0.08, lines: Lines | None = None
         h, w = crop.shape[:2]
         pad = max(2, int(0.5 * lines.xh))
         keep = np.zeros((h, w), np.uint8)
-        protect = [e for e in (lines.chars, lines.rules, lines.edge_chars) if e is not None and len(e)]
+        protect = [e for e in (lines.chars, lines.rules, lines.edge_chars, lines.big) if e is not None and len(e)]
         for bx, by, bw, bh in np.concatenate(protect):
             cv2.rectangle(keep, (int(bx - x0 - pad), int(by - y0 - pad)),
                           (int(bx - x0 + bw + pad), int(by - y0 + bh + pad)), 255, -1)
         band_w = max(3, int(3 * lines.xh))
         band = np.zeros((h, w), bool)
-        band[:band_w], band[-band_w:], band[:, :band_w], band[:, -band_w:] = True, True, True, True
+        band[:, :band_w], band[:, -band_w:] = True, True
+        # top/bottom bands: never wipe inside the row of a text line or word —
+        # dot leaders between an entry and its number are too small to be
+        # protected as letters, and the last/first line of the page sits in
+        # this band
+        tb = np.zeros((h, w), bool)
+        tb[:band_w], tb[-band_w:] = True, True
+        rows = np.zeros(h, bool)
+        for e in (lines.boxes, lines.words):
+            if e is None:
+                continue
+            for bx, by, bw, bh in e:
+                r0, r1 = int(by - y0 - pad), int(by - y0 + bh + pad)
+                rows[max(0, r0):max(0, min(h, r1))] = True
+        band |= tb & ~rows[:, None]
         crop[band & (keep == 0)] = color if crop.ndim == 3 else color[0]
     return cv2.copyMakeBorder(crop, m, m, m, m, cv2.BORDER_CONSTANT,
                               value=color if crop.ndim == 3 else color[0])

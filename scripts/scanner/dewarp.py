@@ -39,6 +39,10 @@ T_DEG = 3          # down the page: cubic polynomial (smooth; a flexible spline 
 T_LINES_PER_INTERVAL = 3  # only used when T_DEG = 0
 T_MIN, T_MAX = 3, 12
 SMOOTH = 0.05      # second-difference penalty (relative)
+TRACE_RULES = True  # also trace horizontal printed lines (table grids, rules) as straight references
+TABLE_SECOND_PASS = True  # table pages (>= 3 traced grid lines): run the correction twice
+RULE_MIN_W = 0.12  # shortest traced line, as a fraction of the page width (one table column)
+EXTEND_LEADERS = True  # follow dot leaders / end numbers past a line's last letter (see _extend_right)
 USE_PREFIX = True  # sample article numbers / list markers at line starts (see _trace_baselines)
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
@@ -73,7 +77,12 @@ def _trace_baselines(gray: np.ndarray):
     cand &= (x > 2) & (y > 2) & (x + bw < w - 2) & (y + bh < h - 2)
     if cand.sum() < 30:
         return None, None
-    xh = float(np.median(bh[cand]))
+    # typical letter height. Ignore marks much smaller than letters first:
+    # dot leaders ("......" in contents pages, tables of cases) can outnumber
+    # letters and would drag a plain median down to the size of a dot.
+    _h = bh[cand]
+    _big = _h >= 0.6 * np.percentile(_h, 75)
+    xh = float(np.median(_h[_big])) if _big.sum() >= 20 else float(np.median(_h))
     keep = cand & (bh < 2.5 * xh) & (bh > 0.35 * xh)
 
     lut = np.zeros(n, np.uint8)
@@ -178,8 +187,81 @@ def _trace_baselines(gray: np.ndarray):
         if pre is not None:
             xs_out = np.concatenate([[q[0] for q in pre], xs_out])
             ys_out = np.concatenate([[q[1] for q in pre], ys_out])
+        if EXTEND_LEADERS:
+            xs_out, ys_out = _extend_right(xs_out, ys_out, st, cent, xh, w, h)
         traced.append((xs_out, ys_out))
+    if TRACE_RULES and table_grid(binv, xh):
+        traced += _trace_rules(binv, xh)
     return traced, xh
+
+
+def _trace_rules(binv: np.ndarray, xh: float):
+    """Horizontal printed lines (table grid lines, header/footer rules) are
+    straight on the real page, exactly like text baselines, and they span the
+    full width — including table columns with too little text to trace (a
+    first column of short labels like "s 19E (4)"). Trace their centre line
+    so the curl correction also straightens them and everything around them.
+    """
+    h, w = binv.shape
+    m = cv2.morphologyEx(binv, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, w // 15), 1)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
+    out = []
+    step = max(4, int(2 * xh))
+    for i in range(1, n):
+        x, y, bw, bh, area = st[i]
+        if bw < RULE_MIN_W * w or area / bw > max(4, 0.6 * xh) or bh > 3 * xh:
+            continue
+        if x <= 2 or y <= 2 or x + bw >= w - 2 or y + bh >= h - 2:
+            continue
+        sub = (lab[y:y + bh, x:x + bw] == i)
+        rows = np.arange(bh)[:, None]
+        xs, ys = [], []
+        for cx in range(0, bw - step + 1, step):
+            c = sub[:, cx:cx + step]
+            cnt = c.sum()
+            if cnt >= step:  # mostly continuous here
+                xs.append(x + cx + step / 2)
+                ys.append(y + float((c * rows).sum()) / cnt)
+        if len(xs) >= 6:
+            out.append((np.array(xs), np.array(ys)))
+    return out
+
+
+def _extend_right(xs, ys, st, cent, xh, w, h):
+    """Follow a line past its last letter along dot leaders and the number
+    at the end ("Samy v/s ... 2020 SCJ 306 ...............457/1").
+
+    Dots and digits are not x-height letters, so the baseline trace stops at
+    the last word; on a table of cases or contents page that leaves the right
+    half of the page with no measurements. Dots and digits sit on the
+    baseline too: walk right along the line's current direction and take
+    blobs whose bottom lies on the predicted baseline (+-0.35 letter heights),
+    one step at most 4 letter heights ahead. On ordinary text lines there is
+    nothing to the right, so nothing changes.
+    """
+    x, y, bw, bh, area = (st[1:, i] for i in range(5))
+    ok = (area >= 2) & (bh < 1.9 * xh) & (bw < 3 * xh) & (x > 2) & (y > 2) & (x + bw < w - 2) & (y + bh < h - 2)
+    cx = cent[1:, 0][ok]
+    by = (y + bh)[ok].astype(np.float64)
+    o = np.argsort(xs)
+    xs, ys = list(np.asarray(xs)[o]), list(np.asarray(ys)[o])
+    step = 2.0 * xh
+    while True:
+        k = min(6, len(xs))
+        kf = np.polyfit(xs[-k:], ys[-k:], 1) if k >= 2 else np.array([0.0, ys[-1]])
+        x_end = xs[-1]
+        cand = (cx > x_end + 0.2 * xh) & (cx <= x_end + 4 * xh)
+        cand &= np.abs(by - np.polyval(kf, cx)) < 0.35 * xh
+        if not cand.any():
+            break
+        # take the blobs of the next step-wide bucket only, then continue
+        x0 = cx[cand].min()
+        b = cand & (cx < x0 + step)
+        xs.append(float(cx[b].mean()))
+        ys.append(float(np.median(by[b])))
+        if len(xs) > 400:
+            break
+    return np.array(xs), np.array(ys)
 
 
 EDGE_DENSE = 0.0   # 0 = even knots. >0 packs knots at the page edges; tested, it breaks line starts on curled pages
@@ -210,7 +292,7 @@ def _basis(xs, ts, x0, x1, t0, t1, nt):
     return (bx[:, :, None] * bt[:, None, :]).reshape(len(xs), -1)
 
 
-def dewarp(img: np.ndarray, work_side: int = 1600) -> tuple[np.ndarray, DewarpInfo]:
+def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: bool = False) -> tuple[np.ndarray, DewarpInfo]:
     H, W = img.shape[:2]
     s = min(2.5, work_side / max(H, W))
     small = cv2.resize(img, (int(W * s), int(H * s)), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
@@ -218,8 +300,19 @@ def dewarp(img: np.ndarray, work_side: int = 1600) -> tuple[np.ndarray, DewarpIn
     h, w = gray.shape
 
     traced, xh = _trace_baselines(gray)
-    if not traced or len(traced) < 4:
+    if not traced or len(traced) < 2:
         return img, DewarpInfo(False, len(traced or []), reason="not enough text lines")
+    if len(traced) < 4 and not _few:
+        # Short pages (a table of cases with 2-3 entries): still correct them,
+        # but with a simpler shape that 2-3 lines can actually pin down —
+        # a straight or quadratic change down the page and 4 intervals across.
+        global T_DEG, X_INTERVALS
+        saved = (T_DEG, X_INTERVALS)
+        T_DEG, X_INTERVALS = len(traced) - 1, 4
+        try:
+            return dewarp(img, work_side, _few=True, _second=_second)
+        finally:
+            T_DEG, X_INTERVALS = saved
 
     # Each line must become a horizontal row. Which row? Measured at the SAME
     # reference x for every line (centre of the text span); otherwise a short
@@ -317,4 +410,68 @@ def dewarp(img: np.ndarray, work_side: int = 1600) -> tuple[np.ndarray, DewarpIn
     map_x, map_y = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
     out = cv2.remap(img, map_x, map_y + field_full, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     info.reason = "ok"
+    # Table pages: steeply curved grid lines aren't recognised as lines on the
+    # first pass (the shape test wants a nearly straight run). After one pass
+    # they are nearly straight, so a second pass can trace and flatten them.
+    if TABLE_SECOND_PASS and not _second and table_grid(_binarize(gray), xh):
+        out2, info2 = dewarp(out, work_side, _few=_few, _second=True)
+        if info2.applied:
+            info.after_px = info2.after_px
+            info.reason = "ok (2 passes)"
+            return out2, info
     return out, info
+
+
+
+def table_grid(binv: np.ndarray, xh: float):
+    """Grid lines of a table, or [] if the page has no table.
+
+    A table's grid is one connected shape, so size tests on connected
+    components never see its lines. Pull straight horizontal and vertical
+    strokes out by shape (morphological opening with a long thin kernel,
+    after thickening 7 px across so a slightly leaning line still forms one
+    run). A grid line always meets a line of the other direction; lines lying
+    along the photo edge (the page edge) are ignored, lines that only touch
+    the photo edge at their end (a table cut off by the photo) may confirm a
+    crossing line but are not returned. The page only counts as a table if at
+    least 2 horizontal AND 3 vertical lines remain — so ordinary pages (header
+    rules, page-edge shadows, a frame around the image) are never tables.
+    Returns boxes (x, y, w, h) in binv coordinates.
+    """
+    h, w = binv.shape
+    extra, axis_of, edge_of = [], [], []
+    for kw, kh, min_len, axis in ((max(15, w // 20), 1, 0.15 * w, 0), (1, max(15, h // 25), 0.08 * h, 1)):
+        src = cv2.dilate(binv, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 7) if axis == 0 else (7, 1)))
+        m = cv2.morphologyEx(src, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh)))
+        m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1) if axis == 0 else (1, 5)))
+        _, _, sr, _ = cv2.connectedComponentsWithStats(m, 8)
+        for rx, ry, rw, rh, ra in sr[1:]:
+            length, thick_ = (rw, ra / max(rw, 1)) if axis == 0 else (rh, ra / max(rh, 1))
+            touches = rx <= 2 or ry <= 2 or rx + rw >= w - 2 or ry + rh >= h - 2
+            # lying along (or within 2.5% of) the photo edge: the page edge or
+            # a frame around the whole image, not a table line
+            mh, mw = 0.025 * h, 0.025 * w
+            along = (ry <= mh or ry + rh >= h - mh) if axis == 0 else (rx <= mw or rx + rw >= w - mw)
+            if along:
+                continue
+            if length >= min_len and thick_ < max(10, 1.2 * xh):
+                extra.append((rx, ry, rw, rh)); axis_of.append(axis); edge_of.append(touches)
+    if not extra:
+        return []
+    E = np.array(extra, dtype=np.float64); A = np.array(axis_of); Ed = np.array(edge_of)
+    tol = 4
+    keep = np.zeros(len(E), bool)
+    for i in range(len(E)):
+        if Ed[i]:
+            continue
+        o = E[A != A[i]]
+        if len(o) == 0:
+            continue
+        x0, y0, x1, y1 = E[i, 0] - tol, E[i, 1] - tol, E[i, 0] + E[i, 2] + tol, E[i, 1] + E[i, 3] + tol
+        keep[i] = bool(((o[:, 0] < x1) & (o[:, 0] + o[:, 2] > x0) & (o[:, 1] < y1) & (o[:, 1] + o[:, 3] > y0)).any())
+    # a table has column separators: >= 3 vertical lines (left border, one
+    # inner line, right border) and >= 2 horizontal lines. A single rectangle
+    # (a box or a frame around the page) is not a table.
+    if (keep & (A == 0)).sum() < 2 or (keep & (A == 1)).sum() < 3:
+        return []
+    return [tuple(int(v) for v in e) for e in E[keep]]
