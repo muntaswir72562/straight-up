@@ -19,6 +19,15 @@ import { ResultPanel } from './ResultPanel';
 
 type ToolMode = 'merge' | 'fullfix' | 'replace';
 
+interface FixQueueEntry {
+  id: string;
+  file: File;
+  pageCount: number | null;
+  error: string | null;
+  isValidating: boolean;
+  status: 'pending' | 'processing' | 'done' | 'error';
+}
+
 function createSlots(count: number, startNumber: number): SlotData[] {
   return Array.from({ length: count }, (_, i) => ({
     id: crypto.randomUUID(),
@@ -44,6 +53,8 @@ export function BookScanTool() {
   const [fixPageCount, setFixPageCount] = useState<number | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixIsValidating, setFixIsValidating] = useState(false);
+  const [fixFiles, setFixFiles] = useState<FixQueueEntry[]>([]);
+  const [fixQueueLabel, setFixQueueLabel] = useState('');
   const [fullfixStraighten, setFullfixStraighten] = useState(false);
   const [fullfixClean, setFullfixClean] = useState(false);
   const [fullfixDewarp, setFullfixDewarp] = useState(false);
@@ -83,10 +94,12 @@ export function BookScanTool() {
     status === 'idle' &&
     !slots.some((s) => s.isValidating);
 
+  const fixHasValidFiles = fixFiles.length > 0
+    ? fixFiles.some((f) => !f.error && f.pageCount !== null && !f.isValidating)
+    : fixFile !== null && !fixIsValidating;
+
   const canStartFix =
-    bookName.trim().length > 0 &&
-    fixFile !== null &&
-    !fixIsValidating &&
+    fixHasValidFiles &&
     (fullfixStraighten || fullfixClean || fullfixDewarp || fullfixV2 || fullfixOcr) &&
     status === 'idle';
 
@@ -113,6 +126,8 @@ export function BookScanTool() {
         setFixPageCount(null);
         setFixError(null);
         setFixIsValidating(false);
+        setFixFiles([]);
+        setFixQueueLabel('');
       }
       if (newMode !== 'replace') {
         if (replacePdf) replacePdf.destroy();
@@ -357,6 +372,65 @@ export function BookScanTool() {
     [locked]
   );
 
+  // --- Fix mode: Add multiple files to queue ---
+  const handleFixFilesAdd = useCallback(
+    (files: File[]) => {
+      if (locked) return;
+      const pdfs = files.filter(
+        (f) => f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf'
+      );
+      if (pdfs.length === 0) return;
+
+      const newEntries: FixQueueEntry[] = pdfs.map((f) => ({
+        id: crypto.randomUUID(),
+        file: f,
+        pageCount: null,
+        error: null,
+        isValidating: true,
+        status: 'pending' as const,
+      }));
+
+      setFixFiles((prev) => [...prev, ...newEntries]);
+
+      for (const entry of newEntries) {
+        validatePdf(entry.file)
+          .then((result) => {
+            setFixFiles((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? {
+                      ...e,
+                      pageCount: result.valid ? result.pageCount : null,
+                      error: result.valid ? null : result.error,
+                      isValidating: false,
+                    }
+                  : e
+              )
+            );
+          })
+          .catch(() => {
+            setFixFiles((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? { ...e, error: "This PDF can't be opened.", isValidating: false }
+                  : e
+              )
+            );
+          });
+      }
+    },
+    [locked]
+  );
+
+  // --- Fix mode: Remove file from queue ---
+  const handleFixFileRemove = useCallback(
+    (id: string) => {
+      if (locked) return;
+      setFixFiles((prev) => prev.filter((e) => e.id !== id));
+    },
+    [locked]
+  );
+
   // --- Replace mode: File change ---
   const handleReplaceFileChange = useCallback(
     (file: File | null) => {
@@ -524,24 +598,47 @@ export function BookScanTool() {
           ? await runMergeV2Pipeline(slots, bookName, progressCb, cancelRef.current)
           : await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
-        const name = bookName.trim() || replaceFile!.name.replace(/\.pdf$/i, '');
+        const name = replaceFile!.name.replace(/\.pdf$/i, '');
         result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, name, progressCb, cancelRef.current);
       } else {
-        result = await runFullfixPipeline(
-          fixFile!, bookName,
-          { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined },
-          progressCb, cancelRef.current
-        );
+        // Full Book Fix: process queue sequentially
+        const queue = fixFiles.length > 0
+          ? fixFiles.filter((f) => !f.error && f.pageCount !== null)
+          : fixFile ? [{ id: 'single', file: fixFile, pageCount: fixPageCount, error: null, isValidating: false, status: 'pending' as const }] : [];
+
+        for (let qi = 0; qi < queue.length; qi++) {
+          if (cancelRef.current.cancelled) throw new Error('Cancelled');
+          const entry = queue[qi];
+          const label = queue.length > 1
+            ? `Book ${qi + 1} of ${queue.length}: ${entry.file.name}`
+            : entry.file.name;
+          setFixQueueLabel(label);
+          setFixFiles((prev) =>
+            prev.map((e) => e.id === entry.id ? { ...e, status: 'processing' } : e)
+          );
+          const name = entry.file.name.replace(/\.pdf$/i, '');
+          result = await runFullfixPipeline(
+            entry.file, name,
+            { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined },
+            progressCb, cancelRef.current
+          );
+          setFixFiles((prev) =>
+            prev.map((e) => e.id === entry.id ? { ...e, status: 'done' } : e)
+          );
+        }
+        setFixQueueLabel('');
       }
 
       // Clean up old URL if any
       if (downloadUrl && downloadUrl.startsWith('blob:')) URL.revokeObjectURL(downloadUrl);
 
-      const url = result.downloadUrl ?? URL.createObjectURL(result.blob);
-      setDownloadUrl(url);
-      setDownloadFilename(result.filename);
-      setResultTotalPages(result.totalPages);
-      setResultAngles(result.angles);
+      if (result) {
+        const url = result.downloadUrl ?? URL.createObjectURL(result.blob);
+        setDownloadUrl(url);
+        setDownloadFilename(result.filename);
+        setResultTotalPages(result.totalPages);
+        setResultAngles(result.angles);
+      }
       setStatus('done');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -552,7 +649,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
+  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -576,6 +673,8 @@ export function BookScanTool() {
     setFixPageCount(null);
     setFixError(null);
     setFixIsValidating(false);
+    setFixFiles([]);
+    setFixQueueLabel('');
     if (replacePdf) replacePdf.destroy();
     setReplacePdf(null);
     setReplaceFile(null);
@@ -590,6 +689,8 @@ export function BookScanTool() {
   // --- Derived values ---
   const totalPages = slots.reduce((sum, s) => sum + (s.pageCount ?? 0), 0);
   const filledCount = slots.filter((s) => s.file !== null).length;
+  const replaceOutputPages = (replacePageCount ?? 0) - deletions.size + insertions.length;
+  const showStickyDownload = mode === 'replace' && replacePdf !== null && canStartReplace && status === 'idle';
 
   const subtitleText =
     mode === 'merge'
@@ -622,14 +723,10 @@ export function BookScanTool() {
     } else {
       if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2 && !fullfixOcr) {
         startHint = 'Select at least one option above.';
-      } else if (bookName.trim().length === 0 && fixFile === null) {
-        startHint = 'Enter a book name and add a PDF to start.';
-      } else if (bookName.trim().length === 0) {
-        startHint = 'Enter a book name above to start.';
-      } else if (fixFile === null) {
-        startHint = 'Add a PDF file to start.';
-      } else if (fixIsValidating) {
-        startHint = 'Validating file...';
+      } else if (fixFiles.length === 0 && fixFile === null) {
+        startHint = 'Add one or more PDF files to start.';
+      } else if (fixFiles.some((f) => f.isValidating)) {
+        startHint = 'Validating files...';
       }
     }
   }
@@ -697,8 +794,8 @@ export function BookScanTool() {
         </div>
       </section>
 
-      {/* Book name input (hidden in replace mode once PDF is loaded) */}
-      {!(mode === 'replace' && replacePdf) && (
+      {/* Book name input (only shown in merge mode) */}
+      {mode === 'merge' && (
         <section className="mx-auto mb-8 sm:mb-10" style={{ maxWidth: '28rem' }}>
           <BookNameInput value={bookName} onChange={setBookName} disabled={locked} />
         </section>
@@ -855,16 +952,123 @@ export function BookScanTool() {
             className="text-sm font-semibold uppercase tracking-wider mb-4"
             style={{ color: 'var(--color-ink-muted)' }}
           >
-            PDF file
+            PDF files
           </h2>
           <FixDropZone
-            file={fixFile}
-            pageCount={fixPageCount}
-            error={fixError}
-            isValidating={fixIsValidating}
+            file={fixFiles.length > 0 ? null : fixFile}
+            pageCount={fixFiles.length > 0 ? null : fixPageCount}
+            error={fixFiles.length > 0 ? null : fixError}
+            isValidating={fixFiles.length > 0 ? false : fixIsValidating}
             locked={locked}
             onFileChange={handleFixFileChange}
+            multiple
+            onMultiFileAdd={handleFixFilesAdd}
           />
+
+          {/* File queue list */}
+          {fixFiles.length > 0 && (
+            <div
+              className="mt-3 flex flex-col gap-1"
+              style={{
+                background: 'var(--color-surface-card)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-lg)',
+                overflow: 'hidden',
+              }}
+            >
+              {fixFiles.map((entry, idx) => (
+                <div
+                  key={entry.id}
+                  className="flex items-center gap-3 px-4 py-2.5"
+                  style={{
+                    borderBottom: idx < fixFiles.length - 1 ? '1px solid var(--color-border)' : 'none',
+                    opacity: entry.status === 'done' ? 0.6 : entry.error ? 0.5 : 1,
+                  }}
+                >
+                  {/* Status icon */}
+                  {entry.status === 'done' ? (
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-success)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <polyline points="3 8 6.5 11.5 13 5" />
+                    </svg>
+                  ) : entry.status === 'processing' ? (
+                    <div
+                      className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin"
+                      style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
+                    />
+                  ) : entry.error ? (
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-danger)" strokeWidth="2" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                      <line x1="4" y1="4" x2="12" y2="12" />
+                      <line x1="12" y1="4" x2="4" y2="12" />
+                    </svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-ink-subtle)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                  )}
+
+                  {/* Filename + page count */}
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className="text-sm truncate"
+                      style={{ color: entry.error ? 'var(--color-danger)' : 'var(--color-ink)' }}
+                      title={entry.file.name}
+                    >
+                      {entry.file.name}
+                    </p>
+                    {entry.error && (
+                      <p className="text-xs" style={{ color: 'var(--color-danger)' }}>{entry.error}</p>
+                    )}
+                  </div>
+
+                  {/* Page count badge */}
+                  {entry.pageCount !== null && !entry.error && (
+                    <span
+                      className="text-xs font-medium px-2 py-0.5"
+                      style={{
+                        background: 'var(--color-accent-subtle)',
+                        color: 'var(--color-accent-hover)',
+                        borderRadius: 'var(--radius-sm)',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {entry.pageCount} pg
+                    </span>
+                  )}
+
+                  {entry.isValidating && (
+                    <div
+                      className="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin"
+                      style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
+                    />
+                  )}
+
+                  {/* Remove button (only when pending and not locked) */}
+                  {entry.status === 'pending' && !locked && (
+                    <button
+                      type="button"
+                      onClick={() => handleFixFileRemove(entry.id)}
+                      className="focus-ring flex items-center justify-center w-6 h-6"
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--color-ink-subtle)',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                        padding: 0,
+                      }}
+                      aria-label={`Remove ${entry.file.name}`}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <line x1="2" y1="2" x2="10" y2="10" />
+                        <line x1="10" y1="2" x2="2" y2="10" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Fix options */}
           <div
@@ -1001,8 +1205,8 @@ export function BookScanTool() {
         </section>
       )}
 
-      {/* Start button (hidden during processing/done) */}
-      {status === 'idle' && (
+      {/* Start button (hidden during processing/done, hidden in replace mode when sticky bar shown) */}
+      {status === 'idle' && !showStickyDownload && (
         <section className="flex flex-col items-center mb-8">
           <button
             type="button"
@@ -1044,6 +1248,14 @@ export function BookScanTool() {
       {/* Progress panel */}
       {status === 'processing' && (
         <section className="mb-8">
+          {fixQueueLabel && (
+            <p
+              className="text-center text-sm font-medium mb-3"
+              style={{ color: 'var(--color-ink-muted)' }}
+            >
+              {fixQueueLabel}
+            </p>
+          )}
           <ProgressPanel
             phase={progressPhase}
             current={progress.current}
@@ -1054,16 +1266,83 @@ export function BookScanTool() {
       )}
 
       {/* Result panel */}
-      {status === 'done' && downloadUrl && (
+      {status === 'done' && (
         <section className="mb-8">
-          <ResultPanel
-            filename={downloadFilename}
-            totalPages={resultTotalPages}
-            downloadUrl={downloadUrl}
-            angles={resultAngles}
-            ocrEnabled={mode === 'fullfix' && fullfixOcr}
-            onStartOver={handleStartOver}
-          />
+          {mode === 'fullfix' && fixFiles.filter((f) => f.status === 'done').length > 1 ? (
+            /* Multi-book done summary */
+            <div
+              className="w-full mx-auto flex flex-col items-center gap-5"
+              style={{ maxWidth: '36rem' }}
+            >
+              <div
+                className="w-full p-6 sm:p-8 flex flex-col items-center gap-5"
+                style={{
+                  background: 'var(--color-surface-card)',
+                  border: '1.5px solid var(--color-border)',
+                  borderRadius: 'var(--radius-xl)',
+                  boxShadow: 'var(--shadow-md)',
+                }}
+              >
+                <div
+                  className="flex items-center justify-center w-14 h-14"
+                  style={{ background: 'oklch(92% 0.06 155)', borderRadius: '50%' }}
+                >
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--color-success)' }}>
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                </div>
+                <div className="text-center">
+                  <p className="text-base font-semibold" style={{ color: 'var(--color-ink)' }}>
+                    All books processed
+                  </p>
+                  <p className="mt-1 text-sm" style={{ color: 'var(--color-ink-muted)' }}>
+                    {fixFiles.filter((f) => f.status === 'done').length} books downloaded
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleStartOver}
+                  className="focus-ring px-5 py-2 text-sm font-medium transition-colors"
+                  style={{
+                    background: 'transparent',
+                    border: '1.5px solid var(--color-border-strong)',
+                    borderRadius: 'var(--radius-md)',
+                    color: 'var(--color-ink-muted)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Start over
+                </button>
+              </div>
+            </div>
+          ) : downloadUrl ? (
+            <ResultPanel
+              filename={downloadFilename}
+              totalPages={resultTotalPages}
+              downloadUrl={downloadUrl}
+              angles={resultAngles}
+              ocrEnabled={mode === 'fullfix' && fullfixOcr}
+              onStartOver={handleStartOver}
+            />
+          ) : (
+            /* Done but no download URL (e.g. all-queue done with native downloads) */
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={handleStartOver}
+                className="focus-ring px-5 py-2.5 text-sm font-medium transition-colors"
+                style={{
+                  background: 'transparent',
+                  border: '1.5px solid var(--color-border-strong)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'var(--color-ink-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                Start over
+              </button>
+            </div>
+          )}
         </section>
       )}
 
@@ -1103,6 +1382,66 @@ export function BookScanTool() {
             </button>
           </div>
         </section>
+      )}
+      {/* Bottom spacer when sticky bar is visible */}
+      {showStickyDownload && <div style={{ height: 72 }} />}
+
+      {/* Sticky download bar for replace mode */}
+      {showStickyDownload && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: '12px 16px',
+            background: 'var(--color-surface-card)',
+            borderTop: '1px solid var(--color-border)',
+            boxShadow: '0 -4px 12px oklch(0% 0 0 / 0.08)',
+            zIndex: 50,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: '16px',
+          }}
+        >
+          <span
+            className="text-xs font-medium px-2.5 py-1"
+            style={{
+              background: 'var(--color-primary-subtle)',
+              color: 'var(--color-primary)',
+              borderRadius: 'var(--radius-sm)',
+            }}
+          >
+            {replaceOutputPages} output {replaceOutputPages === 1 ? 'page' : 'pages'}
+          </span>
+          <button
+            type="button"
+            onClick={handleStart}
+            className="focus-ring flex items-center gap-2 px-6 py-2.5 text-sm font-semibold transition-all"
+            style={{
+              background: 'var(--color-primary)',
+              color: '#fff',
+              borderRadius: 'var(--radius-lg)',
+              border: 'none',
+              cursor: 'pointer',
+              boxShadow: 'var(--shadow-md)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--color-primary-hover)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'var(--color-primary)';
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Download
+          </button>
+        </div>
       )}
     </main>
   );

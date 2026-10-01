@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useCallback } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { PageThumbnail } from './PageThumbnail';
 import { InsertedPageThumbnail } from './InsertedPageThumbnail';
@@ -31,21 +31,28 @@ function isImageFile(file: File): boolean {
     /\.(jpe?g|png|webp)$/i.test(file.name);
 }
 
-function InsertButton({
+function InsertHoverZone({
   afterPage,
+  side,
   locked,
   onInsert,
 }: {
   afterPage: number;
+  side: 'left' | 'right';
   locked: boolean;
   onInsert: (afterPage: number, file: File) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [visible, setVisible] = useState(false);
 
-  const handleClick = useCallback(() => {
-    if (locked) return;
-    fileInputRef.current?.click();
-  }, [locked]);
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (locked) return;
+      fileInputRef.current?.click();
+    },
+    [locked]
+  );
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -58,31 +65,25 @@ function InsertButton({
     [onInsert, afterPage]
   );
 
+  if (locked) return null;
+
   return (
     <div
       style={{
+        position: 'absolute',
+        [side]: -8,
+        top: 0,
+        bottom: 0,
+        width: 16,
+        zIndex: 20,
+        cursor: 'pointer',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        aspectRatio: '0.707',
-        maxHeight: 36,
-        border: '1.5px dashed var(--color-border-strong)',
-        borderRadius: 'var(--radius-md)',
-        cursor: locked ? 'not-allowed' : 'pointer',
-        opacity: locked ? 0.4 : 0.6,
-        transition: 'opacity var(--duration-fast) var(--ease-out-expo), border-color var(--duration-fast) var(--ease-out-expo)',
       }}
+      onMouseEnter={() => setVisible(true)}
+      onMouseLeave={() => setVisible(false)}
       onClick={handleClick}
-      onMouseEnter={(e) => {
-        if (!locked) {
-          e.currentTarget.style.opacity = '1';
-          e.currentTarget.style.borderColor = 'var(--color-primary)';
-        }
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.opacity = locked ? '0.4' : '0.6';
-        e.currentTarget.style.borderColor = 'var(--color-border-strong)';
-      }}
       title={afterPage === 0 ? 'Insert before page 1' : `Insert after page ${afterPage}`}
     >
       <input
@@ -93,19 +94,27 @@ function InsertButton({
         onChange={handleFileChange}
         tabIndex={-1}
       />
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 14 14"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        style={{ color: 'var(--color-ink-muted)' }}
+      <div
+        style={{
+          width: 22,
+          height: 22,
+          borderRadius: '50%',
+          background: 'var(--color-primary)',
+          color: '#fff',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: visible ? 1 : 0,
+          transform: visible ? 'scale(1)' : 'scale(0.7)',
+          transition: 'opacity 150ms, transform 150ms',
+          fontSize: '16px',
+          fontWeight: 700,
+          lineHeight: 1,
+          boxShadow: 'var(--shadow-sm)',
+        }}
       >
-        <line x1="7" y1="1" x2="7" y2="13" />
-        <line x1="1" y1="7" x2="13" y2="7" />
-      </svg>
+        +
+      </div>
     </div>
   );
 }
@@ -129,16 +138,12 @@ export function PageGrid({
   const insertCount = insertions.length;
   const outputPages = totalPages - deleteCount + insertCount;
 
-  // Build flat list of grid items
+  // Build flat list of grid items (no insert buttons — those are hover zones now)
   type GridItem =
-    | { kind: 'insert-button'; afterPage: number; key: string }
     | { kind: 'inserted'; insertion: Insertion; key: string }
     | { kind: 'page'; pageNum: number; key: string };
 
   const items: GridItem[] = [];
-
-  // Insert button before page 1 (afterPage=0)
-  items.push({ kind: 'insert-button', afterPage: 0, key: 'ins-btn-0' });
 
   // Insertions before page 1 (afterPage=0)
   for (const ins of insertions.filter((i) => i.afterPage === 0)) {
@@ -146,11 +151,7 @@ export function PageGrid({
   }
 
   for (let i = 1; i <= totalPages; i++) {
-    // Page thumbnail
     items.push({ kind: 'page', pageNum: i, key: `page-${i}` });
-
-    // Insert button after this page
-    items.push({ kind: 'insert-button', afterPage: i, key: `ins-btn-${i}` });
 
     // Insertions after this page
     for (const ins of insertions.filter((ins) => ins.afterPage === i)) {
@@ -223,46 +224,52 @@ export function PageGrid({
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-          gap: '12px',
+          gap: '16px',
         }}
       >
-        {items.map((item) => {
-          if (item.kind === 'insert-button') {
-            return (
-              <InsertButton
-                key={item.key}
-                afterPage={item.afterPage}
-                locked={locked}
-                onInsert={onInsert}
-              />
-            );
-          }
+        {items.map((item, idx) => {
           if (item.kind === 'inserted') {
+            // Determine afterPage for this insertion's right hover zone
+            const afterPage = item.insertion.afterPage;
             return (
-              <InsertedPageThumbnail
-                key={item.key}
-                file={item.insertion.file}
-                id={item.insertion.id}
-                locked={locked}
-                onRemove={onRemoveInsert}
-              />
+              <div key={item.key} style={{ position: 'relative' }}>
+                <InsertedPageThumbnail
+                  file={item.insertion.file}
+                  id={item.insertion.id}
+                  locked={locked}
+                  onRemove={onRemoveInsert}
+                />
+                {/* Left hover zone on first item */}
+                {idx === 0 && (
+                  <InsertHoverZone afterPage={0} side="left" locked={locked} onInsert={onInsert} />
+                )}
+                <InsertHoverZone afterPage={afterPage} side="right" locked={locked} onInsert={onInsert} />
+              </div>
             );
           }
           // kind === 'page'
+          const pageNum = item.pageNum;
           return (
-            <PageThumbnail
-              key={item.key}
-              pdf={pdf}
-              pageNumber={item.pageNum}
-              totalPages={totalPages}
-              replacement={replacements.get(item.pageNum) ?? null}
-              locked={locked}
-              isDeleted={deletions.has(item.pageNum)}
-              onReplace={onReplace}
-              onUndoReplace={onUndoReplace}
-              onDelete={onDelete}
-              onUndoDelete={onUndoDelete}
-            />
+            <div key={item.key} style={{ position: 'relative' }}>
+              <PageThumbnail
+                pdf={pdf}
+                pageNumber={pageNum}
+                totalPages={totalPages}
+                replacement={replacements.get(pageNum) ?? null}
+                locked={locked}
+                isDeleted={deletions.has(pageNum)}
+                onReplace={onReplace}
+                onUndoReplace={onUndoReplace}
+                onDelete={onDelete}
+                onUndoDelete={onUndoDelete}
+              />
+              {/* Left hover zone on first item (for inserting before page 1) */}
+              {idx === 0 && (
+                <InsertHoverZone afterPage={0} side="left" locked={locked} onInsert={onInsert} />
+              )}
+              {/* Right hover zone (for inserting after this page) */}
+              <InsertHoverZone afterPage={pageNum} side="right" locked={locked} onInsert={onInsert} />
+            </div>
           );
         })}
       </div>

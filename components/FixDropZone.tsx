@@ -9,6 +9,8 @@ interface FixDropZoneProps {
   isValidating: boolean;
   locked: boolean;
   onFileChange: (file: File | null) => void;
+  multiple?: boolean;
+  onMultiFileAdd?: (files: File[]) => void;
 }
 
 function truncateFilename(name: string, maxLength = 40): string {
@@ -25,7 +27,7 @@ function truncateFilename(name: string, maxLength = 40): string {
   return name.slice(0, maxLength - 1) + '\u2026';
 }
 
-export function FixDropZone({ file, pageCount, error, isValidating, locked, onFileChange }: FixDropZoneProps) {
+export function FixDropZone({ file, pageCount, error, isValidating, locked, onFileChange, multiple, onMultiFileAdd }: FixDropZoneProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -62,20 +64,22 @@ export function FixDropZone({ file, pageCount, error, isValidating, locked, onFi
       if (locked) return;
 
       const files = Array.from(e.dataTransfer.files);
-      const pdf = files.find(
+      const pdfs = files.filter(
         (f) => f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf'
       );
 
-      if (files.length > 0 && !pdf) {
-        // Dropped non-PDF files — signal error via a null file
-        // The parent will set the error message
+      if (files.length > 0 && pdfs.length === 0) {
         onFileChange(null);
         return;
       }
 
-      if (pdf) onFileChange(pdf);
+      if (multiple && onMultiFileAdd && pdfs.length > 0) {
+        onMultiFileAdd(pdfs);
+      } else if (pdfs.length > 0) {
+        onFileChange(pdfs[0]);
+      }
     },
-    [locked, onFileChange]
+    [locked, onFileChange, multiple, onMultiFileAdd]
   );
 
   const handleClick = useCallback(() => {
@@ -96,11 +100,15 @@ export function FixDropZone({ file, pageCount, error, isValidating, locked, onFi
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const f = e.target.files?.[0];
-      if (f) onFileChange(f);
+      const files = Array.from(e.target.files ?? []);
+      if (multiple && onMultiFileAdd && files.length > 0) {
+        onMultiFileAdd(files);
+      } else if (files.length > 0) {
+        onFileChange(files[0]);
+      }
       e.target.value = '';
     },
-    [onFileChange]
+    [onFileChange, multiple, onMultiFileAdd]
   );
 
   const handleClear = useCallback(
@@ -170,6 +178,7 @@ export function FixDropZone({ file, pageCount, error, isValidating, locked, onFi
         className="hidden"
         onChange={handleFileChange}
         tabIndex={-1}
+        multiple={multiple}
       />
 
       {/* Empty state */}
@@ -193,10 +202,10 @@ export function FixDropZone({ file, pageCount, error, isValidating, locked, onFi
           </svg>
           <div className="text-center">
             <p className="text-sm font-medium" style={{ color: 'var(--color-ink-muted)' }}>
-              Drop a PDF here or click to browse
+              {multiple ? 'Drop PDFs here or click to browse' : 'Drop a PDF here or click to browse'}
             </p>
             <p className="mt-1 text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
-              Upload your merged PDF to straighten rotated pages
+              {multiple ? 'Add one or more PDFs — they will be processed one by one' : 'Upload your merged PDF to straighten rotated pages'}
             </p>
           </div>
         </div>
