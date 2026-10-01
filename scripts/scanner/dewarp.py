@@ -244,7 +244,19 @@ def _lone_words(chars, idx, cx, cy, centres, bottoms, heights, line_of, long_blo
         ok = np.abs(by - med) < 0.2 * xh
         if ok.sum() < 2 or ok.sum() < 0.6 * m.sum():
             continue
-        groups.append((float(lx + lw / 2.0), med, float(lx), float(lx + lw)))
+        # the number's own baseline (its tilt in the photo), sampled at its
+        # first and last glyph: one point at the centre would let the field
+        # bend around it and rotate the digits
+        gx, gb = centres[m][ok].astype(np.float64), by[ok]
+        if len(gx) >= 3 and np.ptp(gx) > 0.8 * xh:
+            k = np.polyfit(gx, gb, 1)
+            if abs(k[0]) > 0.2:
+                k = np.array([0.0, med])
+        else:
+            k = np.array([0.0, med])
+        a, b = float(gx.min()), float(gx.max())
+        groups.append((float(lx + lw / 2.0), med, float(lx), float(lx + lw),
+                       (a, float(np.polyval(k, a))), (b, float(np.polyval(k, b)))))
     return groups
 
 
@@ -331,7 +343,7 @@ def _attach_column(traced, groups, xh):
                 continue
             o = np.argsort(r)
             if r[o[0]] < 0.25 * xh and (len(r) == 1 or r[o[1]] > 0.6 * xh):
-                add[cand[m][o[0], 1]].append((G[i][0], G[i][1]))
+                add[cand[m][o[0], 1]].extend([G[i][4], G[i][5]])
     out = []
     for (xs, ys), extra in zip(traced, add):
         if extra:
