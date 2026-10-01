@@ -250,6 +250,12 @@ def clean_page(gray):
     """
     Normalize background to white, remove bleed-through, enhance contrast.
     Does NOT binarize — preserves natural text weight and anti-aliasing.
+
+    The contrast levels (Otsu white point, black point) are measured on a
+    copy where thin marks are removed by a 3x3 opening, exactly as before,
+    so bleed-through and specks still fall above the white point. But the
+    stretch is applied to the image WITHOUT the opening: the opening also
+    erased hairlines, serifs and thin/light print (letters came out broken).
     """
     blurred = cv2.GaussianBlur(gray, (BLUR_SIZE, BLUR_SIZE), 0)
 
@@ -261,41 +267,26 @@ def clean_page(gray):
     normalized = cv2.divide(blurred, bg, scale=255)
     del blurred, bg
 
-    # Remove bleed-through: morphological opening on inverted image
-    # erodes then dilates — removes thin/faint features (bleed-through)
-    # while preserving thicker features (actual text)
+    # Levels reference: thin/faint features (bleed-through, specks) removed
     inverted = cv2.bitwise_not(normalized)
-    del normalized
     open_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    opened = cv2.morphologyEx(inverted, cv2.MORPH_OPEN, open_kern)
+    ref = cv2.bitwise_not(cv2.morphologyEx(inverted, cv2.MORPH_OPEN, open_kern))
     del inverted
-    no_bleed = cv2.bitwise_not(opened)
-    del opened
 
-    # Otsu white-point stretch: Otsu finds the threshold between text and
-    # background.  Stretch the range so background becomes white and text
-    # stays dark and natural without losing lighter strokes.
-    otsu_val, _ = cv2.threshold(no_bleed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Push white point 10% above Otsu so near-text grays aren't clipped
+    otsu_val, _ = cv2.threshold(ref, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     white_pt = min(float(otsu_val) * 1.10, 255.0)
-
-    # Black point: 2nd percentile of text pixels — darker anchor keeps text bold
-    dark_pixels = no_bleed[no_bleed < otsu_val]
-    if len(dark_pixels) > 100:
-        black_pt = float(np.percentile(dark_pixels, 2))
-    else:
-        black_pt = 0.0
-    del dark_pixels
-
+    dark_pixels = ref[ref < otsu_val]
+    black_pt = float(np.percentile(dark_pixels, 2)) if len(dark_pixels) > 100 else 0.0
+    del dark_pixels, ref
     if white_pt - black_pt < 10:
         white_pt = black_pt + 10
 
+    # apply the stretch to the UN-opened image
     stretched = np.clip(
-        (no_bleed.astype(np.float32) - black_pt) / (white_pt - black_pt) * 255,
+        (normalized.astype(np.float32) - black_pt) / (white_pt - black_pt) * 255,
         0, 255,
     ).astype(np.uint8)
-    del no_bleed
+    del normalized
     return stretched
 
 

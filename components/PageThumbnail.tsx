@@ -11,8 +11,11 @@ interface PageThumbnailProps {
   totalPages: number;
   replacement: File | null;
   locked: boolean;
+  isDeleted: boolean;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
+  onDelete: (pageNumber: number) => void;
+  onUndoDelete: (pageNumber: number) => void;
 }
 
 function isImageFile(file: File): boolean {
@@ -26,8 +29,11 @@ export function PageThumbnail({
   totalPages,
   replacement,
   locked,
+  isDeleted,
   onReplace,
   onUndoReplace,
+  onDelete,
+  onUndoDelete,
 }: PageThumbnailProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -114,18 +120,26 @@ export function PageThumbnail({
 
   const handleClick = useCallback(() => {
     if (locked) return;
+    if (isDeleted) {
+      onUndoDelete(pageNumber);
+      return;
+    }
     fileInputRef.current?.click();
-  }, [locked]);
+  }, [locked, isDeleted, onUndoDelete, pageNumber]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (locked) return;
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        fileInputRef.current?.click();
+        if (isDeleted) {
+          onUndoDelete(pageNumber);
+        } else {
+          fileInputRef.current?.click();
+        }
       }
     },
-    [locked]
+    [locked, isDeleted, onUndoDelete, pageNumber]
   );
 
   const handleFileChange = useCallback(
@@ -146,6 +160,24 @@ export function PageThumbnail({
       onUndoReplace(pageNumber);
     },
     [locked, onUndoReplace, pageNumber]
+  );
+
+  const handleDelete = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (locked) return;
+      onDelete(pageNumber);
+    },
+    [locked, onDelete, pageNumber]
+  );
+
+  const handleUndoDeleteClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (locked) return;
+      onUndoDelete(pageNumber);
+    },
+    [locked, onUndoDelete, pageNumber]
   );
 
   // Drag and drop
@@ -190,6 +222,7 @@ export function PageThumbnail({
   const isReplaced = replacement !== null;
   const displayUrl = isReplaced ? replacementUrl : thumbnailUrl;
   const isLoading = !displayUrl && (hasBeenVisible || isReplaced);
+  const effectiveOpacity = locked ? 0.6 : isDeleted ? 0.35 : 1;
 
   return (
     <div
@@ -197,9 +230,11 @@ export function PageThumbnail({
       role="button"
       tabIndex={locked ? -1 : 0}
       aria-label={
-        isReplaced
-          ? `Page ${pageNumber} of ${totalPages} (replaced). Click to change or press undo.`
-          : `Page ${pageNumber} of ${totalPages}. Click to replace.`
+        isDeleted
+          ? `Page ${pageNumber} of ${totalPages} (deleted). Click to undo.`
+          : isReplaced
+            ? `Page ${pageNumber} of ${totalPages} (replaced). Click to change or press undo.`
+            : `Page ${pageNumber} of ${totalPages}. Click to replace.`
       }
       className="focus-ring relative cursor-pointer select-none overflow-hidden"
       style={{
@@ -207,13 +242,15 @@ export function PageThumbnail({
         background: isDragOver ? 'var(--color-drop-hover)' : 'var(--color-surface-inset)',
         border: isDragOver
           ? '2px solid var(--color-primary)'
-          : isReplaced
-            ? '2px solid var(--color-success)'
-            : '1px solid var(--color-border)',
+          : isDeleted
+            ? '2px solid var(--color-danger)'
+            : isReplaced
+              ? '2px solid var(--color-success)'
+              : '1px solid var(--color-border)',
         borderRadius: 'var(--radius-md)',
-        opacity: locked ? 0.6 : 1,
+        opacity: effectiveOpacity,
         pointerEvents: locked ? 'none' : 'auto',
-        transition: `border-color var(--duration-fast) var(--ease-out-expo), background var(--duration-fast) var(--ease-out-expo)`,
+        transition: `border-color var(--duration-fast) var(--ease-out-expo), background var(--duration-fast) var(--ease-out-expo), opacity var(--duration-fast) var(--ease-out-expo)`,
       }}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
@@ -279,7 +316,7 @@ export function PageThumbnail({
       </span>
 
       {/* Replaced badge — top right */}
-      {isReplaced && (
+      {isReplaced && !isDeleted && (
         <span
           style={{
             position: 'absolute',
@@ -298,8 +335,28 @@ export function PageThumbnail({
         </span>
       )}
 
-      {/* Undo button — bottom right (only when replaced) */}
-      {isReplaced && !locked && (
+      {/* Deleted badge — top right */}
+      {isDeleted && (
+        <span
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 4,
+            padding: '1px 6px',
+            fontSize: '0.6rem',
+            fontWeight: 600,
+            color: '#fff',
+            background: 'var(--color-danger)',
+            borderRadius: 'var(--radius-sm)',
+            lineHeight: 1.5,
+          }}
+        >
+          Deleted
+        </span>
+      )}
+
+      {/* Undo replace button — bottom right (only when replaced, not deleted) */}
+      {isReplaced && !isDeleted && !locked && (
         <button
           type="button"
           onClick={handleUndo}
@@ -326,8 +383,65 @@ export function PageThumbnail({
         </button>
       )}
 
-      {/* Hover overlay when not replaced */}
-      {!isReplaced && displayUrl && !isDragOver && (
+      {/* Delete button — bottom left (when not deleted and not locked) */}
+      {!isDeleted && !locked && (
+        <button
+          type="button"
+          onClick={handleDelete}
+          className="focus-ring flex items-center justify-center"
+          style={{
+            position: 'absolute',
+            bottom: 4,
+            left: 4,
+            width: 22,
+            height: 22,
+            background: 'oklch(15% 0.02 270 / 0.7)',
+            border: 'none',
+            borderRadius: 'var(--radius-sm)',
+            color: '#fff',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+          aria-label={`Delete page ${pageNumber}`}
+        >
+          {/* Trash icon */}
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M1.5 3h9M4.5 3V1.5h3V3M3 3v7.5h6V3" />
+          </svg>
+        </button>
+      )}
+
+      {/* Undo delete button — bottom left (when deleted) */}
+      {isDeleted && !locked && (
+        <button
+          type="button"
+          onClick={handleUndoDeleteClick}
+          className="focus-ring flex items-center justify-center"
+          style={{
+            position: 'absolute',
+            bottom: 4,
+            left: 4,
+            width: 22,
+            height: 22,
+            background: 'oklch(15% 0.02 270 / 0.7)',
+            border: 'none',
+            borderRadius: 'var(--radius-sm)',
+            color: '#fff',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+          aria-label={`Undo delete for page ${pageNumber}`}
+        >
+          {/* Undo/restore icon */}
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 5.5C2 5.5 3 2 6.5 2C9 2 10.5 4 10.5 6C10.5 8 9 10 6.5 10H4" />
+            <polyline points="4 3.5 2 5.5 4 7.5" />
+          </svg>
+        </button>
+      )}
+
+      {/* Hover overlay when not replaced and not deleted */}
+      {!isReplaced && !isDeleted && displayUrl && !isDragOver && (
         <div
           className="flex items-center justify-center"
           style={{

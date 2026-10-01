@@ -48,6 +48,9 @@ TRACE_PIECES = True  # also trace short text runs (dates, abbreviations) too sho
 TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
+EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
+FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
+JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_column)
 
 
 @dataclass
@@ -203,9 +206,139 @@ def _trace_baselines(gray: np.ndarray):
         if EXTEND_LEADERS:
             xs_out, ys_out = _extend_right(xs_out, ys_out, st, cent, xh, w, h)
         traced.append((xs_out, ys_out))
+    if JUMP_COLUMNS and traced:
+        long_blob = np.zeros(n2, bool)
+        long_blob[1:] = st2[1:, 2] >= 0.15 * w
+        groups = _lone_words(chars, idx, cx, cy, centres, bottoms, heights, line_of, long_blob, xh, w)
+        if groups:
+            traced = _attach_column(traced, groups, xh)
     if TRACE_RULES and table_grid(binv, xh):
         traced += _trace_rules(binv, xh)
     return traced, xh, pieces
+
+
+def _lone_words(chars, idx, cx, cy, centres, bottoms, heights, line_of, long_blob, xh, w):
+    """Short words standing alone, not part of any text line (the page
+    numbers of a contents page, dates): (centre x, baseline, x0, x1).
+    Words are glyphs joined across gaps < 1 letter height; a 3-digit page
+    number is narrower than the 2-letter-height opening used for lines, so
+    lines can't be used here."""
+    kw = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(round(1.0 * xh))), 1))
+    words = cv2.morphologyEx(chars, cv2.MORPH_CLOSE, kw)
+    n3, lab3, st3, _ = cv2.connectedComponentsWithStats(words, 8)
+    word_of = lab3[cy, cx]
+    in_line = long_blob[line_of]
+    groups = []
+    for i in range(1, n3):
+        lx, ly, lw, lh, la = st3[i]
+        if lw >= 0.15 * w or lw < 0.8 * xh or lh > 2.2 * xh:
+            continue
+        m = (word_of == i)
+        if in_line[m].any():
+            continue
+        m &= (heights > 0.55 * xh) & (heights < 1.9 * xh)
+        if m.sum() < 2:
+            continue
+        by = bottoms[m]
+        med = float(np.median(by))
+        ok = np.abs(by - med) < 0.2 * xh
+        if ok.sum() < 2 or ok.sum() < 0.6 * m.sum():
+            continue
+        groups.append((float(lx + lw / 2.0), med, float(lx), float(lx + lw)))
+    return groups
+
+
+def _attach_column(traced, groups, xh):
+    """Attach lone short words (page numbers) to the text line whose row
+    they continue, across the gap.
+
+    On a contents page the page numbers sit far right of the entries with
+    nothing in between, so the curl correction has no measurement there and
+    can only extrapolate — the number column then ends up a row off. Each
+    number is on the baseline of its entry's row. Per column (numbers right
+    of all lines' ends, or left of all starts), the vertical offset between
+    a number and the END of its row's baseline changes smoothly down the
+    page (page tilt / curl across the gap), so fit
+        y_number = y_row_end + d(y),  d linear in y (then quadratic),
+    by RANSAC over number<->row candidate pairs, and attach a number to a
+    row only if it fits within 0.25 letter heights and no other row does.
+    Pages where no consistent column is found are unchanged.
+    """
+    ends = []
+    for k, (xs, ys) in enumerate(traced):
+        o = np.argsort(xs)
+        ends.append((xs[o][0], ys[o][0], xs[o][-1], ys[o][-1]))
+    E = np.array(ends)
+    add = [[] for _ in traced]
+    for side in (1, -1):
+        if side > 0:
+            G = [g for g in groups if g[2] > E[:, 2].max() + 2 * xh]
+            ry = E[:, 3]
+        else:
+            G = [g for g in groups if g[3] < E[:, 0].min() - 2 * xh]
+            ry = E[:, 1]
+        # one column only: the numbers share a right edge (left edge on the
+        # left side); other short words (article ranges "203 à 211") don't
+        if len(G) < 5:
+            continue
+        edge = np.array([g[3] if side > 0 else g[2] for g in G])
+        e0 = np.median(edge)
+        G = [g for g, e in zip(G, edge) if abs(e - e0) < 1.5 * xh]
+        if len(G) < 5:
+            continue
+        rs = np.diff(np.sort(ry))
+        rs = rs[rs > 0.8 * xh]
+        rowsp = float(np.median(rs)) if len(rs) else 2.5 * xh
+        gy = np.array([g[1] for g in G])
+        # candidate pairs: each number with rows within +-4 letter heights
+        cand = [(i, j) for i in range(len(G)) for j in range(len(ry)) if abs(gy[i] - ry[j]) < 4 * xh]
+        if len(cand) < 5:
+            continue
+        cand = np.array(cand)
+        dy = gy[cand[:, 0]] - ry[cand[:, 1]]
+        yy = gy[cand[:, 0]]
+        best, best_p = -1, None
+        rng = np.random.default_rng(0)
+        for _ in range(400):
+            a, b = rng.choice(len(cand), 2, replace=False)
+            if cand[a, 0] == cand[b, 0] or abs(yy[a] - yy[b]) < 3 * xh:
+                continue
+            p = np.polyfit([yy[a], yy[b]], [dy[a], dy[b]], 1)
+            # a number is on ITS row: the offset across the gap must stay
+            # well under one row spacing, or the hypothesis is "one row off"
+            if np.abs(np.polyval(p, gy)).max() > 0.45 * rowsp:
+                continue
+            inl = np.abs(dy - np.polyval(p, yy)) < 0.25 * xh
+            cnt = len(np.unique(cand[inl, 0]))
+            if cnt > best:
+                best, best_p = cnt, p
+        # most rows that have a number must agree (short entries aren't
+        # traced as lines, so there can be fewer rows than numbers)
+        if best_p is None or best < max(5, 0.6 * min(len(G), len(ry))):
+            continue
+        p = best_p
+        for deg in (1, 2):
+            inl = np.abs(dy - np.polyval(p, yy)) < 0.25 * xh
+            if inl.sum() > 3 * (deg + 1):
+                q = np.polyfit(yy[inl], dy[inl], deg)
+                if np.abs(np.polyval(q, gy)).max() <= 0.45 * rowsp:
+                    p = q
+        res = np.abs(dy - np.polyval(p, yy))
+        for i in range(len(G)):
+            m = cand[:, 0] == i
+            r = res[m]
+            if not len(r):
+                continue
+            o = np.argsort(r)
+            if r[o[0]] < 0.25 * xh and (len(r) == 1 or r[o[1]] > 0.6 * xh):
+                add[cand[m][o[0], 1]].append((G[i][0], G[i][1]))
+    out = []
+    for (xs, ys), extra in zip(traced, add):
+        if extra:
+            xs = np.concatenate([xs, [e[0] for e in extra]])
+            ys = np.concatenate([ys, [e[1] for e in extra]])
+        out.append((xs, ys))
+    return out
 
 
 def _trim_ends(p: np.ndarray, xh: float) -> np.ndarray:
@@ -313,14 +446,49 @@ def _extend_right(xs, ys, st, cent, xh, w, h):
 
 EDGE_DENSE = 0.0   # 0 = even knots. >0 packs knots at the page edges; tested, it breaks line starts on curled pages
 
+_XK = []  # extra inner x knots for the current page (see EDGE_FOLD)
 
-def _bspline(v: np.ndarray, v0: float, v1: float, n_int: int, edge_dense: float = 0.0) -> np.ndarray:
+
+def _edge_knots(traced, xh, x0, x1):
+    """Extra knots near a page edge where the lines bend sharply.
+
+    Where the paper folds over at the outer edge (or into the spine), the
+    whole bend happens within the last word of each line. The even knot
+    spacing (1/10 of the text width, ~7 letter heights) is too coarse to
+    follow it, so the last word stays lifted. Measure it: for each line
+    reaching that edge, how far its end samples leave the straight
+    continuation of the samples before them. Only if the typical line bends
+    by more than 0.3 letter heights there, add knots 1.5/3/4.5/6 letter
+    heights from that edge. Pages without such a fold get no extra knots
+    (unchanged result).
+    """
+    out = []
+    for side in (1, -1):
+        edge = x1 if side > 0 else x0
+        bends = []
+        for xs, ys in traced:
+            o = np.argsort(xs) if side > 0 else np.argsort(-xs)
+            xs_, ys_ = xs[o], ys[o]
+            if len(xs_) < 9 or abs(xs_[-1] - edge) > 3 * xh:
+                continue  # line doesn't reach this edge
+            if np.abs(np.diff(xs_[-4:])).max() > 4 * xh:
+                continue  # a gap (page number attached across white space): not a fold
+            k = np.polyfit(xs_[-9:-3], ys_[-9:-3], 1)
+            bends.append(float(np.max(np.abs(ys_[-3:] - np.polyval(k, xs_[-3:])))))
+        if len(bends) >= 5 and np.median(bends) > 0.3 * xh:
+            out += [edge - side * m * xh for m in (1.5, 3.0, 4.5, 6.0)]
+    return out
+
+
+def _bspline(v: np.ndarray, v0: float, v1: float, n_int: int, edge_dense: float = 0.0, extra=()) -> np.ndarray:
     k = 3
     u = np.linspace(0.0, 1.0, n_int + 1)
     # page curl is strongest at the page edges, so optionally put narrower
     # intervals there (blend of even and cosine spacing)
     u = (1 - edge_dense) * u + edge_dense * (1 - np.cos(np.pi * u)) / 2
     inner = (v0 + (v1 - v0) * u)[1:-1]
+    if len(extra):
+        inner = np.sort(np.concatenate([inner, [e for e in extra if v0 < e < v1]]))
     knots = np.concatenate([[v0] * (k + 1), inner, [v1] * (k + 1)])
     v = np.clip(v, v0, v1 - 1e-9)  # clamp: never extrapolate into the margins
     return BSpline.design_matrix(v, knots, k).toarray()
@@ -334,7 +502,7 @@ def _t_basis(ts, t0, t1, nt):
 
 
 def _basis(xs, ts, x0, x1, t0, t1, nt):
-    bx = _bspline(xs, x0, x1, X_INTERVALS, EDGE_DENSE)
+    bx = _bspline(xs, x0, x1, X_INTERVALS, EDGE_DENSE, _XK)
     bt = _t_basis(ts, t0, t1, nt)
     return (bx[:, :, None] * bt[:, None, :]).reshape(len(xs), -1)
 
@@ -392,10 +560,11 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     n_lines = len(traced)
     c = np.array([float(np.median(ys)) for _, ys in traced])  # initial rows
     x0, x1 = X.min(), X.max()
+    _XK[:] = _edge_knots(traced[:n_main], xh, x0, x1) if EDGE_FOLD else []
     x_ref = 0.5 * (x0 + x1)
 
     nt = int(np.clip(round(n_lines / T_LINES_PER_INTERVAL), T_MIN, T_MAX))
-    nbx = X_INTERVALS + 3
+    nbx = _bspline(np.array([x0]), x0, x1, X_INTERVALS, EDGE_DENSE, _XK).shape[1]
     nbt = T_DEG + 1 if T_DEG > 0 else nt + 3
     Dx = np.diff(np.eye(nbx), 2, axis=0)
     P = np.kron(Dx.T @ Dx, np.eye(nbt))
@@ -412,7 +581,7 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         # unknowns z = [coef, c]
         M = np.hstack([A, S_.T])
         MtM = M.T @ M
-        lam = SMOOTH * np.trace(A.T @ A) / A.shape[1]
+        lam = (FOLD_SMOOTH if _XK else SMOOTH) * np.trace(A.T @ A) / A.shape[1]
         gw = 10.0 * np.trace(A.T @ A) / len(tg)
         MtM[:A.shape[1], :A.shape[1]] += lam * P + gw * (G.T @ G) + 1e-6 * lam * np.eye(A.shape[1])
         z = np.linalg.solve(MtM, M.T @ Y)

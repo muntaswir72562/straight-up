@@ -13,7 +13,7 @@ import { runMergeV2Pipeline } from '@/lib/straightenPipeline';
 import { BookNameInput } from './BookNameInput';
 import { SlotGrid } from './SlotGrid';
 import { FixDropZone } from './FixDropZone';
-import { PageGrid } from './PageGrid';
+import { PageGrid, type Insertion } from './PageGrid';
 import { ProgressPanel } from './ProgressPanel';
 import { ResultPanel } from './ResultPanel';
 
@@ -59,6 +59,8 @@ export function BookScanTool() {
   const [replaceError, setReplaceError] = useState<string | null>(null);
   const [replaceIsValidating, setReplaceIsValidating] = useState(false);
   const [replacements, setReplacements] = useState<Map<number, File>>(new Map());
+  const [deletions, setDeletions] = useState<Set<number>>(new Set());
+  const [insertions, setInsertions] = useState<Insertion[]>([]);
   const [replacePdf, setReplacePdf] = useState<PDFDocumentProxy | null>(null);
 
   // --- Shared state ---
@@ -90,7 +92,7 @@ export function BookScanTool() {
 
   const canStartReplace =
     replaceFile !== null &&
-    replacements.size > 0 &&
+    (replacements.size > 0 || deletions.size > 0 || insertions.length > 0) &&
     status === 'idle';
 
   const canStart =
@@ -120,6 +122,8 @@ export function BookScanTool() {
         setReplaceError(null);
         setReplaceIsValidating(false);
         setReplacements(new Map());
+        setDeletions(new Set());
+        setInsertions([]);
       }
     },
     [locked, mode, replacePdf]
@@ -362,6 +366,8 @@ export function BookScanTool() {
       if (replacePdf) replacePdf.destroy();
       setReplacePdf(null);
       setReplacements(new Map());
+      setDeletions(new Set());
+      setInsertions([]);
 
       if (file === null) {
         setReplaceFile(null);
@@ -428,6 +434,38 @@ export function BookScanTool() {
     });
   }, []);
 
+  // --- Replace mode: Delete page ---
+  const handleDelete = useCallback((pageNumber: number) => {
+    setDeletions((prev) => new Set(prev).add(pageNumber));
+    // Deleting a replaced page clears the replacement
+    setReplacements((prev) => {
+      if (!prev.has(pageNumber)) return prev;
+      const next = new Map(prev);
+      next.delete(pageNumber);
+      return next;
+    });
+  }, []);
+
+  const handleUndoDelete = useCallback((pageNumber: number) => {
+    setDeletions((prev) => {
+      const next = new Set(prev);
+      next.delete(pageNumber);
+      return next;
+    });
+  }, []);
+
+  // --- Replace mode: Insert page ---
+  const handleInsert = useCallback((afterPage: number, file: File) => {
+    setInsertions((prev) => [
+      ...prev,
+      { afterPage, file, id: crypto.randomUUID() },
+    ]);
+  }, []);
+
+  const handleRemoveInsert = useCallback((id: string) => {
+    setInsertions((prev) => prev.filter((ins) => ins.id !== id));
+  }, []);
+
   // --- Clean up PDFs on unmount ---
   useEffect(() => {
     return () => {
@@ -487,7 +525,7 @@ export function BookScanTool() {
           : await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = bookName.trim() || replaceFile!.name.replace(/\.pdf$/i, '');
-        result = await runReplacePipeline(replaceFile!, replacements, name, progressCb, cancelRef.current);
+        result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, name, progressCb, cancelRef.current);
       } else {
         result = await runFullfixPipeline(
           fixFile!, bookName,
@@ -514,7 +552,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
+  }, [canStart, mode, slots, bookName, fixFile, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -545,6 +583,8 @@ export function BookScanTool() {
     setReplaceError(null);
     setReplaceIsValidating(false);
     setReplacements(new Map());
+    setDeletions(new Set());
+    setInsertions([]);
   }, [downloadUrl, replacePdf]);
 
   // --- Derived values ---
@@ -576,8 +616,8 @@ export function BookScanTool() {
         startHint = 'Add a PDF file to get started.';
       } else if (replaceIsValidating) {
         startHint = 'Validating file...';
-      } else if (replacements.size === 0) {
-        startHint = 'Click on a page thumbnail to replace it.';
+      } else if (replacements.size === 0 && deletions.size === 0 && insertions.length === 0) {
+        startHint = 'Replace, delete, or insert pages to get started.';
       }
     } else {
       if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2 && !fullfixOcr) {
@@ -797,9 +837,15 @@ export function BookScanTool() {
               pdf={replacePdf}
               totalPages={replacePageCount}
               replacements={replacements}
+              deletions={deletions}
+              insertions={insertions}
               locked={locked}
               onReplace={handleReplace}
               onUndoReplace={handleUndoReplace}
+              onDelete={handleDelete}
+              onUndoDelete={handleUndoDelete}
+              onInsert={handleInsert}
+              onRemoveInsert={handleRemoveInsert}
             />
           )}
         </section>

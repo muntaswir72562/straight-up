@@ -3,6 +3,10 @@ import { assemblePdf, type AssemblePage } from './pdf/assemble';
 import { sanitizeBookName } from './filename';
 import { JPEG_QUALITY, MAX_RENDER_DIMENSION } from './constants';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
+import type { Insertion } from '@/components/PageGrid';
+
+/** Upload chunk size — 400 MB */
+const CHUNK_SIZE = 400 * 1024 * 1024;
 
 /**
  * Convert an image File (JPEG, PNG, WebP) to JPEG bytes via canvas.
@@ -50,12 +54,150 @@ async function imageFileToJpeg(file: File, quality: number): Promise<Uint8Array>
 }
 
 /**
- * Replace-pages pipeline: swap specific pages with user-provided images,
- * then reassemble the PDF. No deskew/OpenCV needed.
+ * Upload assembled PDF to server, run OCR on specific pages, poll, download.
+ */
+async function runOcrOnServer(
+  pdfBlob: Blob,
+  ocrPageIndices: number[],
+  bookName: string,
+  onProgress: (progress: PipelineProgress) => void,
+  cancelRef: { cancelled: boolean }
+): Promise<PipelineResult> {
+  const apiBase = '/api/replace-ocr';
+
+  // --- Step 1: Create job ---
+  onProgress({ phase: 'preparing', current: 0, total: 0 });
+
+  const createForm = new FormData();
+  createForm.append('action', 'create');
+  createForm.append('ocrPages', ocrPageIndices.join(','));
+
+  const createRes = await fetch(apiBase, { method: 'POST', body: createForm });
+  if (!createRes.ok) {
+    const msg = await createRes.text();
+    throw new Error(`Failed to create OCR job: ${msg}`);
+  }
+  const { jobId } = (await createRes.json()) as { jobId: string };
+
+  if (cancelRef.cancelled) {
+    await fetch(`${apiBase}?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+    throw new Error('Cancelled');
+  }
+
+  // --- Step 2: Upload in chunks ---
+  const totalChunks = Math.ceil(pdfBlob.size / CHUNK_SIZE);
+
+  for (let i = 0; i < totalChunks; i++) {
+    if (cancelRef.cancelled) {
+      await fetch(`${apiBase}?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+      throw new Error('Cancelled');
+    }
+
+    onProgress({ phase: 'preparing', current: i + 1, total: totalChunks });
+
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, pdfBlob.size);
+    const chunk = pdfBlob.slice(start, end);
+
+    const chunkForm = new FormData();
+    chunkForm.append('action', 'chunk');
+    chunkForm.append('jobId', jobId);
+    chunkForm.append('chunk', chunk);
+
+    const chunkRes = await fetch(apiBase, { method: 'POST', body: chunkForm });
+    if (!chunkRes.ok) {
+      await fetch(`${apiBase}?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+      const msg = await chunkRes.text();
+      throw new Error(`Upload failed: ${msg}`);
+    }
+  }
+
+  if (cancelRef.cancelled) {
+    await fetch(`${apiBase}?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+    throw new Error('Cancelled');
+  }
+
+  // --- Step 3: Start processing ---
+  const startForm = new FormData();
+  startForm.append('action', 'start');
+  startForm.append('jobId', jobId);
+
+  const startRes = await fetch(apiBase, { method: 'POST', body: startForm });
+  if (!startRes.ok) {
+    const msg = await startRes.text();
+    throw new Error(`Failed to start OCR: ${msg}`);
+  }
+
+  // --- Step 4: Poll for progress ---
+  let totalPages = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (cancelRef.cancelled) {
+      await fetch(`${apiBase}?id=${jobId}`, { method: 'DELETE' }).catch(() => {});
+      throw new Error('Cancelled');
+    }
+
+    await new Promise((r) => setTimeout(r, 400));
+
+    const res = await fetch(`${apiBase}?id=${jobId}`);
+    if (!res.ok) throw new Error('Failed to check OCR status');
+    const status = (await res.json()) as {
+      phase: string;
+      current: number;
+      total: number;
+      error?: string;
+    };
+
+    if (status.phase === 'error') {
+      throw new Error(status.error || 'OCR processing failed');
+    }
+
+    if (status.phase === 'done') {
+      totalPages = status.total || status.current;
+      break;
+    }
+
+    totalPages = status.total || 0;
+    onProgress({
+      phase: (status.phase || 'ocr') as PipelinePhase,
+      current: status.current || 0,
+      total: totalPages,
+    });
+  }
+
+  // --- Step 5: Download result via native browser download ---
+  onProgress({ phase: 'merging', current: totalPages, total: totalPages });
+
+  const safeName = sanitizeBookName(bookName);
+  const downloadUrl = `${apiBase}/download?id=${jobId}&name=${encodeURIComponent(safeName)}`;
+
+  const link = document.createElement('a');
+  link.href = downloadUrl;
+  link.download = `${safeName}.pdf`;
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => document.body.removeChild(link), 200);
+
+  return {
+    blob: new Blob(),
+    filename: `${safeName}.pdf`,
+    totalPages,
+    angles: [],
+    downloadUrl,
+  };
+}
+
+/**
+ * Replace-pages pipeline: swap, delete, or insert pages in a PDF,
+ * then reassemble. If replaced/inserted pages exist, run OCR on them
+ * server-side so the output remains searchable.
  */
 export async function runReplacePipeline(
   file: File,
   replacements: Map<number, File>, // 1-based pageNumber → image File
+  deletions: Set<number>,
+  insertions: Insertion[],
   bookName: string,
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
@@ -67,17 +209,14 @@ export async function runReplacePipeline(
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const totalPages = pdfDoc.getPageCount();
 
-  // --- Phase: Preparing ---
+  // --- Phase: Preparing — convert images to JPEG ---
   onProgress({ phase: 'preparing', current: 0, total: totalPages });
 
   if (cancelRef.cancelled) throw new Error('Cancelled');
 
-  // Build pages array — collect page sizes for replacement pages
-  const assemblePages: AssemblePage[] = [];
-  const replacementEntries = Array.from(replacements.entries());
-
   // Convert replacement images to JPEG
   const convertedReplacements = new Map<number, Uint8Array>();
+  const replacementEntries = Array.from(replacements.entries());
 
   for (let i = 0; i < replacementEntries.length; i++) {
     if (cancelRef.cancelled) throw new Error('Cancelled');
@@ -86,37 +225,108 @@ export async function runReplacePipeline(
     onProgress({
       phase: 'preparing' as PipelinePhase,
       current: i + 1,
-      total: replacementEntries.length,
+      total: replacementEntries.length + insertions.length,
     });
 
     const jpegBytes = await imageFileToJpeg(imgFile, JPEG_QUALITY);
     convertedReplacements.set(pageNum, jpegBytes);
   }
 
+  // Convert insertion images to JPEG
+  const convertedInsertions = new Map<string, Uint8Array>();
+
+  for (let i = 0; i < insertions.length; i++) {
+    if (cancelRef.cancelled) throw new Error('Cancelled');
+
+    const ins = insertions[i];
+    onProgress({
+      phase: 'preparing' as PipelinePhase,
+      current: replacementEntries.length + i + 1,
+      total: replacementEntries.length + insertions.length,
+    });
+
+    const jpegBytes = await imageFileToJpeg(ins.file, JPEG_QUALITY);
+    convertedInsertions.set(ins.id, jpegBytes);
+  }
+
   if (cancelRef.cancelled) throw new Error('Cancelled');
 
-  // Build the assembly plan
+  // Helper: get page size for a given original page number (1-based)
+  const getPageSize = (pageNum: number) => {
+    const page = pdfDoc.getPage(pageNum - 1);
+    return page.getSize();
+  };
+
+  // Helper: get nearest page size for insertion point
+  const getNearestPageSize = (afterPage: number) => {
+    if (afterPage > 0 && afterPage <= totalPages) {
+      return getPageSize(afterPage);
+    }
+    if (totalPages > 0) {
+      return getPageSize(1);
+    }
+    return { width: 595, height: 842 }; // A4 fallback
+  };
+
+  // Build the assembly plan in output order
+  const assemblePages: AssemblePage[] = [];
+  const ocrPageIndices: number[] = []; // 1-based output page numbers needing OCR
+  let outputIndex = 0;
+
+  // Insertions before page 1 (afterPage === 0)
+  for (const ins of insertions.filter((i) => i.afterPage === 0)) {
+    outputIndex++;
+    const jpegBytes = convertedInsertions.get(ins.id)!;
+    const pageSize = getNearestPageSize(0);
+    assemblePages.push({
+      kind: 'straightened',
+      jpegBytes,
+      pageSizePoints: pageSize,
+    });
+    ocrPageIndices.push(outputIndex);
+  }
+
   for (let i = 0; i < totalPages; i++) {
     const pageNum = i + 1;
-    const jpegBytes = convertedReplacements.get(pageNum);
 
-    if (jpegBytes) {
-      const page = pdfDoc.getPage(i);
-      const { width, height } = page.getSize();
+    // Skip deleted pages
+    if (!deletions.has(pageNum)) {
+      outputIndex++;
+
+      const replacementJpeg = convertedReplacements.get(pageNum);
+      if (replacementJpeg) {
+        const { width, height } = getPageSize(pageNum);
+        assemblePages.push({
+          kind: 'straightened',
+          jpegBytes: replacementJpeg,
+          pageSizePoints: { width, height },
+        });
+        ocrPageIndices.push(outputIndex);
+      } else {
+        assemblePages.push({ kind: 'untouched', pdfIndex: 0, pageIndex: i });
+      }
+    }
+
+    // Insertions after this page
+    for (const ins of insertions.filter((ins) => ins.afterPage === pageNum)) {
+      outputIndex++;
+      const jpegBytes = convertedInsertions.get(ins.id)!;
+      const pageSize = getNearestPageSize(pageNum);
       assemblePages.push({
         kind: 'straightened',
         jpegBytes,
-        pageSizePoints: { width, height },
+        pageSizePoints: pageSize,
       });
-    } else {
-      assemblePages.push({ kind: 'untouched', pdfIndex: 0, pageIndex: i });
+      ocrPageIndices.push(outputIndex);
     }
   }
 
   if (cancelRef.cancelled) throw new Error('Cancelled');
 
+  const outputTotalPages = assemblePages.length;
+
   // --- Phase: Merging ---
-  onProgress({ phase: 'merging', current: 0, total: totalPages });
+  onProgress({ phase: 'merging', current: 0, total: outputTotalPages });
 
   const merged = await assemblePdf(
     { pdfs: [pdfBytes], bookTitle: bookName.trim() },
@@ -129,5 +339,11 @@ export async function runReplacePipeline(
   const filename = `${safeName}.pdf`;
   const blob = new Blob([merged.buffer as ArrayBuffer], { type: 'application/pdf' });
 
-  return { blob, filename, totalPages, angles: [] };
+  // If no pages need OCR (delete-only), return directly
+  if (ocrPageIndices.length === 0) {
+    return { blob, filename, totalPages: outputTotalPages, angles: [] };
+  }
+
+  // Pages need OCR — upload to server
+  return runOcrOnServer(blob, ocrPageIndices, bookName, onProgress, cancelRef);
 }
