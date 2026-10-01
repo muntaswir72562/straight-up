@@ -373,6 +373,7 @@ export function PageThumbnail({
             color: '#fff',
             cursor: 'pointer',
             padding: 0,
+            zIndex: 10,
           }}
           aria-label={`Undo replacement for page ${pageNumber}`}
         >
@@ -401,6 +402,7 @@ export function PageThumbnail({
             color: '#fff',
             cursor: 'pointer',
             padding: 0,
+            zIndex: 10,
           }}
           aria-label={`Delete page ${pageNumber}`}
         >
@@ -429,6 +431,7 @@ export function PageThumbnail({
             color: '#fff',
             cursor: 'pointer',
             padding: 0,
+            zIndex: 10,
           }}
           aria-label={`Undo delete for page ${pageNumber}`}
         >
