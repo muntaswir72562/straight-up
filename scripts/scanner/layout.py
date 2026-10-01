@@ -269,7 +269,11 @@ def text_box(img: np.ndarray, lines: Lines | None = None):
     # normal reach, so specks near the page edge still stay out.
     reach_far = max(reach_v, 0.08 * max(H, W))
     wd = lines.words if lines.words is not None else np.zeros((0, 4))
-    groups = [(b, reach_far), (wd, reach_far), (ch, reach_v), (lines.rules, reach_far), (lines.big, reach_far)]
+    # printed header/footer rules sit a fixed distance from the text, often
+    # with a big gap; reach further for them (the stick-out test below still
+    # keeps page edges and shadows out)
+    reach_rule = max(reach_far, 0.12 * max(H, W))
+    groups = [(b, reach_far), (wd, reach_far), (ch, reach_v), (lines.rules, reach_rule), (lines.big, reach_far)]
     groups = [(e, r) for e, r in groups if e is not None and len(e)]
     items = np.concatenate([e for e, _ in groups]) if groups else np.zeros((0, 4))
     reaches = np.concatenate([np.full(len(e), r) for e, r in groups]) if groups else np.zeros(0)

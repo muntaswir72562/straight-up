@@ -44,13 +44,15 @@ TABLE_SECOND_PASS = True  # table pages (>= 3 traced grid lines): run the correc
 RULE_MIN_W = 0.12  # shortest traced line, as a fraction of the page width (one table column)
 EXTEND_LEADERS = True  # follow dot leaders / end numbers past a line's last letter (see _extend_right)
 USE_PREFIX = True  # sample article numbers / list markers at line starts (see _trace_baselines)
-TRACE_PIECES = True  # also trace short text runs (dates, abbreviations) too short for a full line
-TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
-OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
+TRACE_PIECES = True  # also measure short text pieces (a date column, a column of short entries) that are too short to be traced as lines
+JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_groups)
+VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to the traced span's ends (see _virtual_ext)
+FAR_SLOPE = True   # beyond EXTRAP_X, continue the field with the lines' average slope (page skew) instead of holding flat
 EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
 FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
-JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_column)
+TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
+OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
 
 
 @dataclass
@@ -112,17 +114,14 @@ def _trace_baselines(gray: np.ndarray):
     xl = (heights > 0.55 * xh) & (heights < 1.25 * xh)
 
     step = 2.0 * xh
-    traced, pieces = [], []
+    traced, pieces, groups = [], [], []
     for i in range(1, n2):
         lx, ly, lw, lh, la = st2[i]
         if lw < 0.15 * w:
-            # Short run — too few buckets for a full trace, but it may still
-            # be a date, abbreviation, or label whose curl can be measured.
-            if TRACE_PIECES and lw >= 0.04 * w:
-                m_short = (line_of == i)
-                if m_short.sum() >= 3:
-                    sx, sy = centres[m_short], bottoms[m_short]
-                    pieces.append((sx, sy))
+            if TRACE_PIECES:
+                pc = _trace_piece(i, st2[i], line_of, centres, bottoms, heights, xh, w)
+                if pc is not None:
+                    pieces.append(pc)
             continue
         thick = la / lw
         if thick > 2.2 * xh or thick < 0.3 * xh:
@@ -360,19 +359,38 @@ def _trim_ends(p: np.ndarray, xh: float) -> np.ndarray:
     return p
 
 
-def _trace_piece(centres_x: np.ndarray, bottoms_y: np.ndarray, xh: float):
-    """Condense a short text run (3-20 glyphs) into a single (x, y) sample.
+def _trace_piece(i, st_i, line_of, centres, bottoms, heights, xh, w):
+    """Baseline of a short text piece: one word or entry in a column that is
+    too short to count as a text line ("1849-1852" in a date column, "Leach"
+    in a column of abbreviations). Such columns can lie wholly outside the
+    traced lines, where the field would otherwise only be extrapolated and
+    rotates the words. A piece only tells the fit its local TILT (it gets its
+    own row offset, like every line), never which row it belongs to.
 
-    With only a handful of glyphs there aren't enough buckets to resolve the
-    shape of the curl across the piece, but the median bottom still tells
-    the field what the baseline height is at this x location — which is
-    exactly what's missing in narrow columns.
+    Letters, digits and capitals all sit on the baseline; descenders and
+    raised marks are dropped by requiring the bottoms to agree on one
+    straight line (>= 4 glyphs within 0.25 letter heights).
     """
-    if len(centres_x) < 3:
+    lx, ly, lw, lh, la = st_i
+    if lw < 3 * xh:
         return None
-    mx = float(np.median(centres_x))
-    my = float(np.median(bottoms_y))
-    return np.array([mx]), np.array([my])
+    thick = la / max(lw, 1)
+    if thick > 2.2 * xh or thick < 0.3 * xh:
+        return None
+    m = (line_of == i) & (heights > 0.55 * xh) & (heights < 1.9 * xh)
+    if m.sum() < 4:
+        return None
+    cx, by = centres[m].astype(np.float64), bottoms[m]
+    base = np.median(by)
+    for _ in range(2):
+        sel = np.abs(by - base) < 0.4 * xh if np.ndim(base) == 0 else np.abs(by - np.polyval(base, cx)) < 0.25 * xh
+        if sel.sum() < 4 or np.ptp(cx[sel]) < 2 * xh:
+            return None
+        base = np.polyfit(cx[sel], by[sel], 1)
+    if abs(base[0]) > 0.3:
+        return None
+    a, b = float(cx[sel].min()), float(cx[sel].max())
+    return (np.array([a, b]), np.array([np.polyval(base, a), np.polyval(base, b)]))
 
 
 def _trace_rules(binv: np.ndarray, xh: float):
@@ -446,7 +464,66 @@ def _extend_right(xs, ys, st, cent, xh, w, h):
 
 EDGE_DENSE = 0.0   # 0 = even knots. >0 packs knots at the page edges; tested, it breaks line starts on curled pages
 
+
 _XK = []  # extra inner x knots for the current page (see EDGE_FOLD)
+
+
+def _far_content(gray, xh, x0, x1):
+    """Sides (+1 right, -1 left) with a column of text far outside the traced
+    lines (> EXTRAP_X letter heights away): the page numbers of a contents
+    page, a column of dates. Only then are virtual samples used, so ordinary
+    pages are unchanged."""
+    binv = _binarize(gray)
+    n, _, st, cent = cv2.connectedComponentsWithStats(binv, 8)
+    h, w = gray.shape
+    bw, bh, area = st[1:, 2], st[1:, 3], st[1:, 4]
+    ok = (bh > 0.5 * xh) & (bh < 2.0 * xh) & (bw < 3 * xh) & (area > 6)
+    ok &= (st[1:, 0] > 2) & (st[1:, 1] > 2) & (st[1:, 0] + bw < w - 2) & (st[1:, 1] + bh < h - 2)
+    cx, cy = cent[1:, 0][ok], cent[1:, 1][ok]
+    gap = EXTRAP_X * xh
+    out = []
+    for side, m in ((1, cx > x1 + gap), (-1, cx < x0 - gap)):
+        if m.sum() < 8:
+            continue
+        # a real column: glyphs on at least 5 different rows, spread over a
+        # third of the page height (not a stray mark or a few specks)
+        rows = np.unique(np.round(cy[m] / (1.5 * xh)))
+        if len(rows) >= 5 and np.ptp(cy[m]) > 0.33 * h:
+            out.append(side)
+    return tuple(out)
+
+
+def _virtual_ext(traced, xh, x0, x1, sides=(1, -1)):
+    """Weak virtual samples that continue every text line straight (with the
+    slope of its own end) out to the ends of the traced span.
+
+    The field is fitted on the area the lines cover. Where a corner has no
+    lines at all — e.g. the top right of a contents page, where the entries
+    are short and only the lower lines reach far right — the field there is
+    pure extrapolation of the polynomial down the page and can swing the
+    wrong way, moving the page numbers a whole row off. With no other
+    evidence, a text line continues straight; these samples say exactly that,
+    with a small weight, so real samples always win where they exist.
+    """
+    step = 2.0 * xh
+    vx, vy, vl = [], [], []
+    for k, (xs, ys) in enumerate(traced):
+        if len(xs) < 4:
+            continue
+        o = np.argsort(xs); xs, ys = xs[o], ys[o]
+        for side in sides:
+            if side > 0:
+                xe, xa, ya = x1, xs[-6:], ys[-6:]
+                start = xs[-1]
+            else:
+                xe, xa, ya = x0, xs[:6], ys[:6]
+                start = xs[0]
+            if abs(xe - start) < 2 * step:
+                continue
+            kf = np.polyfit(xa, ya, 1)
+            pts = np.arange(start + side * step, xe + side * 1e-6, side * step)
+            vx.extend(pts); vy.extend(np.polyval(kf, pts)); vl.extend([k] * len(pts))
+    return np.array(vx, float), np.array(vy, float), np.array(vl, int)
 
 
 def _edge_knots(traced, xh, x0, x1):
@@ -529,20 +606,6 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         finally:
             T_DEG, X_INTERVALS = saved
 
-    n_main = len(traced)
-
-    # Add short text pieces as single-point constraints within the traced range
-    if TRACE_PIECES and pieces:
-        all_ys = np.concatenate([ys for _, ys in traced])
-        y_lo, y_hi = float(all_ys.min()), float(all_ys.max())
-        for sx, sy in pieces:
-            pt = _trace_piece(sx, sy, xh)
-            if pt is None:
-                continue
-            px, py = pt
-            if y_lo <= py[0] <= y_hi:
-                traced.append((px, py))
-
     # Each line must become a horizontal row. Which row? Measured at the SAME
     # reference x for every line (centre of the text span); otherwise a short
     # line (median taken over its left part) and a long line (median at the
@@ -552,8 +615,17 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     # jointly for the field D and one row offset c_i per line, with the gauge
     # D(x_ref, t) = 0, iterating because the basis depends on the rows.
     bends = []
-    for xs, ys in traced[:n_main]:
+    for xs, ys in traced:
         bends.append(float(np.abs(ys - np.median(ys)).max()))
+    before_rms = float(np.sqrt(np.mean(np.concatenate(
+        [ys - np.median(ys) for _, ys in traced]) ** 2)))
+    n_main = len(traced)
+    # pieces add tilt information only (own row each), and only between the
+    # first and last traced line: the field is not extended by them to a
+    # footer or page number above/below the text
+    rows = [float(np.median(ys)) for _, ys in traced]
+    lo, hi = min(rows) - 0.5 * xh, max(rows) + 0.5 * xh
+    traced = traced + [pc for pc in pieces if lo <= pc[1].mean() <= hi]
     X = np.concatenate([xs for xs, _ in traced])
     Y = np.concatenate([ys for _, ys in traced])
     line_id = np.concatenate([np.full(len(xs), k) for k, (xs, _) in enumerate(traced)])
@@ -562,6 +634,22 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     x0, x1 = X.min(), X.max()
     _XK[:] = _edge_knots(traced[:n_main], xh, x0, x1) if EDGE_FOLD else []
     x_ref = 0.5 * (x0 + x1)
+    Wt = np.ones(len(X))
+    sides = _far_content(gray, xh, x0, x1) if VIRTUAL_EXT > 0 else ()
+    if sides:
+        vx, vy, vl = _virtual_ext(traced[:n_main], xh, x0, x1, sides)
+        if len(vx):
+            # only fill holes: drop a virtual sample when real samples exist
+            # near it (within 2 steps across, 3 letter heights up/down)
+            near = np.zeros(len(vx), bool)
+            for j in range(0, len(vx), 512):
+                dx = np.abs(vx[j:j + 512, None] - X[None, :]) < 4 * xh
+                dy = np.abs(vy[j:j + 512, None] - Y[None, :]) < 3 * xh
+                near[j:j + 512] = (dx & dy).any(axis=1)
+            vx, vy, vl = vx[~near], vy[~near], vl[~near]
+        if len(vx):
+            X = np.concatenate([X, vx]); Y = np.concatenate([Y, vy])
+            line_id = np.concatenate([line_id, vl]); Wt = np.concatenate([Wt, np.full(len(vx), VIRTUAL_EXT)])
 
     nt = int(np.clip(round(n_lines / T_LINES_PER_INTERVAL), T_MIN, T_MAX))
     nbx = _bspline(np.array([x0]), x0, x1, X_INTERVALS, EDGE_DENSE, _XK).shape[1]
@@ -580,11 +668,12 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         G = _basis(np.full_like(tg, x_ref), tg, x0, x1, t0, t1, nt)  # gauge rows
         # unknowns z = [coef, c]
         M = np.hstack([A, S_.T])
-        MtM = M.T @ M
-        lam = (FOLD_SMOOTH if _XK else SMOOTH) * np.trace(A.T @ A) / A.shape[1]
-        gw = 10.0 * np.trace(A.T @ A) / len(tg)
+        MtM = M.T @ (Wt[:, None] * M)
+        AtA = A.T @ (Wt[:, None] * A)
+        lam = (FOLD_SMOOTH if _XK else SMOOTH) * np.trace(AtA) / A.shape[1]
+        gw = 10.0 * np.trace(AtA) / len(tg)
         MtM[:A.shape[1], :A.shape[1]] += lam * P + gw * (G.T @ G) + 1e-6 * lam * np.eye(A.shape[1])
-        z = np.linalg.solve(MtM, M.T @ Y)
+        z = np.linalg.solve(MtM, M.T @ (Wt * Y))
         coef, c_new = z[:A.shape[1]], z[A.shape[1]:]
         done = np.abs(c_new - c).max() < 0.05
         c = c_new
@@ -597,10 +686,7 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     resid = b - A @ coef
 
     before = float(np.percentile(bends, 90))
-    before_rms = float(np.sqrt(np.mean(np.concatenate(
-        [ys - np.median(ys) for _, ys in traced[:n_main]]) ** 2)))
-    main_mask = line_id < n_main
-    after = float(np.sqrt(np.mean(resid[main_mask] ** 2)))
+    after = float(np.sqrt(np.mean(resid[(line_id < n_main) & (Wt == 1)] ** 2)))
     info = DewarpInfo(True, n_main, before / s, after / s,
                       debug_lines=[(xs / s, ys / s) for xs, ys in traced])
     if before < 0.2 * xh:
@@ -635,6 +721,17 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
             slope = ((de - di) / (sign * h_)).reshape(GX.shape)  # d(disp)/dx at the edge (work px)
             dist = np.clip((GX - xe) * sign, 0, EXTRAP_X * xh)
             disp = disp + np.where(outside, sign * slope * dist / s, 0.0)
+            if FAR_SLOPE:
+                # Further out (a column of page numbers far right of the
+                # entries on a contents page) continue with the line's AVERAGE
+                # slope over the traced span instead of holding flat: that is
+                # the page's skew / perspective, which keeps going across the
+                # gap; holding flat leaves such a column a row off.
+                da = _basis(np.full_like(gyv, x0), gyv, x0, x1, t0, t1, nt) @ coef
+                db = _basis(np.full_like(gyv, x1), gyv, x0, x1, t0, t1, nt) @ coef
+                mslope = ((db - da) / max(x1 - x0, 1.0)).reshape(GX.shape)
+                far = np.clip((GX - xe) * sign - EXTRAP_X * xh, 0, None)
+                disp = disp + np.where(outside, sign * mslope * far / s, 0.0)
     field_full = RectBivariateSpline(gy, gx, disp, kx=3, ky=3)(
         np.arange(H, dtype=np.float64), np.arange(W, dtype=np.float64)).astype(np.float32)
 
