@@ -146,8 +146,11 @@ def _fit_edge(ys: np.ndarray, xs: np.ndarray, tol: float, min_inliers: int, side
     r = np.abs(xs[None, :] - (a[:, None] + b[:, None] * ys[None, :]))
     inl = r < tol
     signed = xs[None, :] - (a[:, None] + b[:, None] * ys[None, :])
-    beyond = (signed < -tol) if side == "left" else (signed > tol)
-    valid = beyond.sum(1) <= max(1, int(0.08 * n))
+    if side is None:
+        valid = np.ones(len(a), bool)  # plain best-supported edge
+    else:
+        beyond = (signed < -tol) if side == "left" else (signed > tol)
+        valid = beyond.sum(1) <= max(1, int(0.08 * n))
     if not valid.any():
         return None
     cnt = np.where(valid, inl.sum(1), -1)
@@ -194,6 +197,20 @@ def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarr
     fl = _fit_edge(ycl, allb[:, 0], tol, max(5, int(0.25 * len(allb))), "left")
     if fl is None:
         return img, AlignInfo(False, "no consistent left margin")
+    # The outer-edge fit can mix two different margins when the page's
+    # indentation changes (outdented chapter headings at the top, appendix
+    # headings flush with the entries at the bottom of a contents page): it
+    # then "finds" a slant that no column actually has. A real slant or bow
+    # moves every line the same way, so it must also show in the edge most
+    # lines sit on. If that edge has a clearly different shape, trust it.
+    fd = _fit_edge(ycl, allb[:, 0], tol, max(5, int(0.5 * len(allb))), None)
+    if fd is not None:
+        lo, hi = max(fl[1][0], fd[1][0]), min(fl[1][1], fd[1][1])
+        if hi > lo:
+            yy = np.linspace(lo, hi, 50)
+            dd = np.polyval(fl[0], yy) - np.polyval(fd[0], yy)
+            if np.ptp(dd) > tol:
+                fl = fd
     # Right edge: long lines only, and a clear majority must sit on it. Tables
     # of contents, forms and ragged-right text have no real right edge, and
     # "straightening" a fake one stretches and cuts rows.
