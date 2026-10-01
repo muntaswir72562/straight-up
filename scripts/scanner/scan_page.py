@@ -25,6 +25,46 @@ from straighten_pdf import (
 )
 
 
+def _skew_angle(gray: np.ndarray, max_deg: float = 6.0):
+    """Skew of the text in degrees, in cv2.getRotationMatrix2D's convention
+    (so straighten with -angle), or None if there's too little text. Projection profile: rotate the ink pixels and pick the angle whose
+    row histogram is sharpest (text rows = tall peaks, gaps = empty). Works
+    with a single text line, needs no line detection."""
+    h, w = gray.shape
+    s = min(1.0, 1000 / max(h, w))
+    small = cv2.resize(gray, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+    binv = cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 15)
+    binv = cv2.morphologyEx(binv, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))  # specks
+    m = 0.03  # ignore a band along the photo border (page edges, shadows)
+    hh, ww = binv.shape
+    binv[:int(m * hh)], binv[-int(m * hh):], binv[:, :int(m * ww)], binv[:, -int(m * ww):] = 0, 0, 0, 0
+    ys, xs = np.nonzero(binv)
+    if len(xs) < 500:
+        return None
+    if len(xs) > 200000:
+        k = np.random.default_rng(0).choice(len(xs), 200000, replace=False)
+        ys, xs = ys[k], xs[k]
+    xs = xs - ww / 2.0
+    ys = ys - hh / 2.0
+    nb = int(np.hypot(hh, ww)) + 2
+
+    def score(a):
+        t = np.deg2rad(a)
+        yr = ys * np.cos(t) + xs * np.sin(t)
+        hist = np.bincount((yr + nb / 2).astype(int), minlength=nb).astype(np.float64)
+        return float((hist ** 2).sum())
+
+    coarse = np.arange(-max_deg, max_deg + 1e-9, 0.25)
+    sc = np.array([score(a) for a in coarse])
+    a0 = coarse[int(np.argmax(sc))]
+    fine = np.arange(a0 - 0.25, a0 + 0.25 + 1e-9, 0.02)
+    a1 = float(fine[int(np.argmax([score(a) for a in fine]))])
+    # must be clearly sharper than neighbours, otherwise no text structure
+    if sc.max() < 1.05 * np.median(sc):
+        return None
+    return a1
+
+
 def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.ndarray:
     """
     Run the scanner v2 pipeline on a single grayscale page.
@@ -59,18 +99,18 @@ def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.n
         print(f"{tag}: dewarped ({dinfo.lines} lines, bend={dinfo.before_px:.1f}px)", file=sys.stderr)
     else:
         print(f"{tag}: dewarp skipped ({dinfo.reason})", file=sys.stderr)
-        # Fallback: if dewarp couldn't run (not enough lines, fit not reliable)
-        # but the page isn't already straight, try legacy deskew
+        # Fallback: dewarp couldn't run (too little text, unreliable fit):
+        # still remove the skew, so v2 never loses straightening. Projection
+        # profile estimator (_skew_angle), not straighten_pdf's
+        # detect_skew_from_text, which over/under-estimates (3.0 deg -> 2.1,
+        # 0 deg -> 1.1 on a 4-line contents page) and whose straighten_page crops.
         if dinfo.reason != "page already straight":
-            fall_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
-            fh, fw = fall_gray.shape
-            scale = DETECT_WIDTH / fw
-            small = cv2.resize(fall_gray, (DETECT_WIDTH, int(fh * scale)), interpolation=cv2.INTER_AREA)
-            angle, confidence = detect_skew_from_text(small)
-            if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
-                fall_gray = straighten_page(fall_gray, angle)
-                bgr = cv2.cvtColor(fall_gray, cv2.COLOR_GRAY2BGR)
-                print(f"{tag}: fallback deskew {angle:.2f}° (conf={confidence:.1f})", file=sys.stderr)
+            angle = _skew_angle(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
+            if angle is not None and abs(angle) >= 0.1:
+                h, w = bgr.shape[:2]
+                M = cv2.getRotationMatrix2D((w / 2, h / 2), -angle, 1.0)
+                bgr = cv2.warpAffine(bgr, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                print(f"{tag}: fallback deskew {angle:.2f} deg", file=sys.stderr)
 
     # Step 4: RANSAC column alignment
     bgr, ainfo = align_columns(bgr)

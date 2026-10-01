@@ -51,6 +51,7 @@ VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to 
 FAR_SLOPE = True   # beyond EXTRAP_X, continue the field with the lines' average slope (page skew) instead of holding flat
 EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
 FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
+MAX_SHIFT = 6.0   # refuse a correction that moves text by more than this x max(measured bend, letter height)
 TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
 
@@ -594,13 +595,17 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     traced, xh, pieces = _trace_baselines(gray)
     if not traced or len(traced) < 2:
         return img, DewarpInfo(False, len(traced or []), reason="not enough text lines")
-    if len(traced) < 4 and not _few:
+    # count distinct ROWS, not traced pieces: two pieces of the same row
+    # (a line broken by a wide gap) pin down nothing more down the page
+    rws = np.sort([float(np.median(ys)) for _, ys in traced])
+    n_rows = 1 + int((np.diff(rws) > 1.0 * xh).sum())
+    if n_rows < 4 and not _few:
         # Short pages (a table of cases with 2-3 entries): still correct them,
         # but with a simpler shape that 2-3 lines can actually pin down —
         # a straight or quadratic change down the page and 4 intervals across.
         global T_DEG, X_INTERVALS
         saved = (T_DEG, X_INTERVALS)
-        T_DEG, X_INTERVALS = len(traced) - 1, 4
+        T_DEG, X_INTERVALS = max(n_rows - 1, 0), 4
         try:
             return dewarp(img, work_side, _few=True, _second=_second)
         finally:
@@ -732,6 +737,18 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
                 mslope = ((db - da) / max(x1 - x0, 1.0)).reshape(GX.shape)
                 far = np.clip((GX - xe) * sign - EXTRAP_X * xh, 0, None)
                 disp = disp + np.where(outside, sign * mslope * far / s, 0.0)
+    if MAX_SHIFT > 0:
+        # safety net: inside the text area the correction can't move text
+        # much further than the measured bend; a field that does is a fit
+        # gone wrong (too few rows to pin it down), so leave the page alone
+        yy, xx = np.meshgrid(gy, gx, indexing="ij")
+        X_all = np.concatenate([xs for xs, _ in traced]) / s
+        Y_all = np.concatenate([ys for _, ys in traced]) / s
+        m = (xx >= X_all.min()) & (xx <= X_all.max()) & (yy >= Y_all.min() - 2 * xh / s) & (yy <= Y_all.max() + 2 * xh / s)
+        lim = MAX_SHIFT * max(before, xh) / s
+        if m.any() and np.abs(disp[m]).max() > lim:
+            info.applied, info.reason = False, "correction implausible"
+            return img, info
     field_full = RectBivariateSpline(gy, gx, disp, kx=3, ky=3)(
         np.arange(H, dtype=np.float64), np.arange(W, dtype=np.float64)).astype(np.float32)
 
