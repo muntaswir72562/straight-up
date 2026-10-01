@@ -52,6 +52,9 @@ FAR_SLOPE = True   # beyond EXTRAP_X, continue the field with the lines' average
 EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
 FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
 FEW_ROWS = 6       # pages with fewer text rows use the simple shape (at most quadratic down the page, 4 intervals across): 4-5 rows can't pin a cubic, it swings between them
+MAX_TILT = 0       # (tested, off: steep corrections are legitimate on page-edge folds; a cap undid them)
+SPARSE_ROWS = 10   # pages with fewer text rows than this ...
+SPARSE_MIN_BEND = 0.4  # ... are only corrected when the bend is at least this many letter heights
 MAX_SHIFT = 6.0   # refuse a correction that moves text by more than this x max(measured bend, letter height)
 TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
@@ -707,7 +710,9 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     after = float(np.sqrt(np.mean(resid[(line_id < n_main) & (Wt == 1)] ** 2)))
     info = DewarpInfo(True, n_main, before / s, after / s,
                       debug_lines=[(xs / s, ys / s) for xs, ys in traced])
-    if before < 0.2 * xh:
+    # pages with few rows: a small measured bend is mostly noise (quotes,
+    # italics, line-end marks), and correcting it bends headings around it
+    if before < (SPARSE_MIN_BEND if n_rows < SPARSE_ROWS else 0.2) * xh:
         info.applied, info.reason = False, "page already straight"
         return img, info
     if after > 0.7 * before_rms:
@@ -750,6 +755,19 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
                 mslope = ((db - da) / max(x1 - x0, 1.0)).reshape(GX.shape)
                 far = np.clip((GX - xe) * sign - EXTRAP_X * xh, 0, None)
                 disp = disp + np.where(outside, sign * mslope * far / s, 0.0)
+    if MAX_TILT > 0:
+        step = float(gx[1] - gx[0])
+        ref = int(np.argmin(np.abs(gx - x_ref / s)))
+        d0 = np.diff(disp, axis=1)
+        Xa = np.concatenate([xs for xs, _ in traced]) / s
+        Ya = np.concatenate([ys for _, ys in traced]) / s
+        gxm = 0.5 * (gx[1:] + gx[:-1])
+        inside = ((gxm[None, :] >= Xa.min()) & (gxm[None, :] <= Xa.max())
+                  & (gy[:, None] >= Ya.min()) & (gy[:, None] <= Ya.max()))
+        if (np.abs(d0)[inside] > MAX_TILT * step).any():
+            dx = np.clip(d0, -MAX_TILT * step, MAX_TILT * step)
+            cum = np.concatenate([np.zeros((disp.shape[0], 1)), np.cumsum(dx, axis=1)], axis=1)
+            disp = disp[:, ref:ref + 1] + cum - cum[:, ref:ref + 1]
     if MAX_SHIFT > 0:
         # safety net: inside the text area the correction can't move text
         # much further than the measured bend; a field that does is a fit
