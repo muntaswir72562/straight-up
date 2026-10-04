@@ -35,6 +35,7 @@ class Lines:
 
 
 TABLE_LINES = True  # detect table grid lines (horizontal + vertical) for framing
+DROP_SLIVERS = True  # keep lone hair-thin marks (page-edge shadow) out of text lines
 
 
 def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
@@ -67,6 +68,23 @@ def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
     keep = cand & (bh < 2.5 * xh) & (bh > 0.35 * xh)
     lut = np.zeros(n, np.uint8)
     lut[1:][keep] = 255
+    if DROP_SLIVERS:
+        # Hair-thin marks with no real glyph beside them (the 1-px shadow line
+        # along the page edge, broken into letter-sized pieces) must not be
+        # joined into text lines: a bold heading 2 letter heights away would
+        # get a line box reaching to the page edge, and the left-margin fit
+        # then finds a slant that isn't there. Real narrow glyphs (l, i, 1)
+        # sit next to other letters. They stay in `chars` (framing unchanged).
+        thin = keep & (bw <= max(2, 0.2 * xh))
+        real = keep & ~thin
+        if thin.any() and real.any():
+            rx0, rx1 = x[real], x[real] + bw[real]
+            ry0, ry1 = y[real], y[real] + bh[real]
+            for i in np.nonzero(thin)[0]:
+                gap = np.maximum(rx0 - (x[i] + bw[i]), x[i] - rx1)
+                vov = np.minimum(ry1, y[i] + bh[i]) - np.maximum(ry0, y[i])
+                if not ((gap < 1.2 * xh) & (vov > 0)).any():
+                    lut[1 + i] = 0
     chars = lut[lab]
 
     kx = max(3, int(round(2.0 * xh)))
