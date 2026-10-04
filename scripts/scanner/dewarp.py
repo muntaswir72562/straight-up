@@ -51,10 +51,12 @@ VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to 
 FAR_SLOPE = True   # beyond EXTRAP_X, continue the field with the lines' average slope (page skew) instead of holding flat
 EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
 FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
-FEW_ROWS = 6       # pages with fewer text rows use the simple shape (at most quadratic down the page, 4 intervals across): 4-5 rows can't pin a cubic, it swings between them
 MAX_TILT = 0       # (tested, off: steep corrections are legitimate on page-edge folds; a cap undid them)
 SPARSE_ROWS = 10   # pages with fewer text rows than this ...
 SPARSE_MIN_BEND = 0.4  # ... are only corrected when the bend is at least this many letter heights
+CAPS_LINES = True   # trace all-capital heading lines as straight references ...
+CAPS_MAX_ROWS = 4   # ... but only on pages with fewer traced lines than this
+FEW_ROWS = 6       # pages with fewer text rows use the simple shape (at most quadratic down the page, 4 intervals across): 4-5 rows can't pin a cubic, it swings between them
 MAX_SHIFT = 6.0   # refuse a correction that moves text by more than this x max(measured bend, letter height)
 TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
@@ -119,7 +121,7 @@ def _trace_baselines(gray: np.ndarray):
     xl = (heights > 0.55 * xh) & (heights < 1.25 * xh)
 
     step = 2.0 * xh
-    traced, pieces, groups = [], [], []
+    traced, pieces, groups, caps = [], [], [], []
     for i in range(1, n2):
         lx, ly, lw, lh, la = st2[i]
         if lw < 0.15 * w:
@@ -133,6 +135,10 @@ def _trace_baselines(gray: np.ndarray):
             continue
         m = (line_of == i) & xl
         if m.sum() < 8:
+            if CAPS_LINES:
+                cl = _trace_caps(i, st2[i], line_of, centres, bottoms, heights, xh)
+                if cl is not None:
+                    caps.append(cl)
             continue
         cxs, bys = centres[m], bottoms[m]
         # Line-start prefix (article numbers "2125.", list markers): digits are
@@ -210,6 +216,12 @@ def _trace_baselines(gray: np.ndarray):
         if EXTEND_LEADERS:
             xs_out, ys_out = _extend_right(xs_out, ys_out, st, cent, xh, w, h)
         traced.append((xs_out, ys_out))
+    # Sparse pages only: all-capital lines (headings like "TABLE OF CONTENTS")
+    # have no x-height letters, so they are never traced. On a page with only
+    # one or two text lines they are the only other straight reference; add
+    # them there. Full pages are unchanged.
+    if caps and len(traced) + len(caps) < CAPS_MAX_ROWS:
+        traced += caps
     if JUMP_COLUMNS and traced:
         long_blob = np.zeros(n2, bool)
         long_blob[1:] = st2[1:, 2] >= 0.15 * w
@@ -355,6 +367,36 @@ def _attach_column(traced, groups, xh):
             ys = np.concatenate([ys, [e[1] for e in extra]])
         out.append((xs, ys))
     return out
+
+
+def _trace_caps(i, st_i, line_of, centres, bottoms, heights, xh):
+    """Baseline of an all-capitals line: its glyphs (capitals, digits) share
+    one height and one bottom line. At least 6 glyphs of similar height whose
+    bottoms agree within 0.15 of that height; sampled every ~2 glyph heights."""
+    m = (line_of == i) & (heights >= 1.1 * xh) & (heights < 2.5 * xh)
+    if m.sum() < 6:
+        return None
+    hm = float(np.median(heights[m]))
+    m &= np.abs(heights - hm) < 0.2 * hm
+    if m.sum() < 6:
+        return None
+    cx, by = centres[m].astype(np.float64), bottoms[m].astype(np.float64)
+    o = np.argsort(cx); cx, by = cx[o], by[o]
+    k = np.polyfit(cx, by, 1)
+    ok = np.abs(by - np.polyval(k, cx)) < 0.15 * hm
+    if ok.sum() < 6 or abs(k[0]) > 0.2:
+        return None
+    cx, by = cx[ok], by[ok]
+    step = 2.0 * hm
+    pts = []
+    for a in np.arange(cx[0], cx[-1] + step, step):
+        sel = (cx >= a) & (cx < a + step)
+        if sel.any():
+            pts.append((float(cx[sel].mean()), float(np.median(by[sel]))))
+    if len(pts) < 3:
+        return None
+    p = np.array(pts)
+    return p[:, 0], p[:, 1]
 
 
 def _trim_ends(p: np.ndarray, xh: float) -> np.ndarray:
@@ -756,6 +798,11 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
                 far = np.clip((GX - xe) * sign - EXTRAP_X * xh, 0, None)
                 disp = disp + np.where(outside, sign * mslope * far / s, 0.0)
     if MAX_TILT > 0:
+        # A vertical-only correction can level a tilted word but not rotate
+        # its letters back: where the text is rotated by more than ~7 deg
+        # (a corner curling up) the letters come out sheared ("applican t").
+        # Limit how steeply the correction may change across a row; beyond
+        # that the words keep a little tilt but stay readable.
         step = float(gx[1] - gx[0])
         ref = int(np.argmin(np.abs(gx - x_ref / s)))
         d0 = np.diff(disp, axis=1)
@@ -764,6 +811,8 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         gxm = 0.5 * (gx[1:] + gx[:-1])
         inside = ((gxm[None, :] >= Xa.min()) & (gxm[None, :] <= Xa.max())
                   & (gy[:, None] >= Ya.min()) & (gy[:, None] <= Ya.max()))
+        # only touch pages whose TEXT AREA needs it (extrapolated margins
+        # may be steep without harm)
         if (np.abs(d0)[inside] > MAX_TILT * step).any():
             dx = np.clip(d0, -MAX_TILT * step, MAX_TILT * step)
             cum = np.concatenate([np.zeros((disp.shape[0], 1)), np.cumsum(dx, axis=1)], axis=1)
