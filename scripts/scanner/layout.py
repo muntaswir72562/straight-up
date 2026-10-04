@@ -36,6 +36,7 @@ class Lines:
 
 TABLE_LINES = True  # detect table grid lines (horizontal + vertical) for framing
 DROP_SLIVERS = True  # keep lone hair-thin marks (page-edge shadow) out of text lines
+LEFT_NEEDS_SUPPORT = True  # unconfirmed left-edge fit that disagrees with the right edge -> use right edge only
 
 
 def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
@@ -233,11 +234,35 @@ def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarr
     # of contents, forms and ragged-right text have no real right edge, and
     # "straightening" a fake one stretches and cuts rows.
     fr = _fit_edge(yc, right, tol, max(6, int(0.5 * len(b))), "right")
+    # No edge holds even half the lines (headnote, quotes, numbered items and
+    # body text all start at different indents): the outer-edge fit then
+    # joins starts from different blocks (an item label at the top, body
+    # text at the bottom) into a steep "slant". If the right edge - which a
+    # clear majority of the long lines DO sit on - doesn't show that shape,
+    # the left fit is not a real margin: take the slant from the right edge
+    # alone and keep every row's width (indents stay as printed).
+    left_ok = True
+    if LEFT_NEEDS_SUPPORT and fd is None and fr is not None:
+        lo, hi = max(fl[1][0], fr[1][0]), min(fl[1][1], fr[1][1])
+        if hi > lo:
+            yy = np.linspace(lo, hi, 50)
+            yl = np.linspace(fl[1][0], fl[1][1], 50)
+            yr = np.linspace(fr[1][0], fr[1][1], 50)
+            # ... and only when the left fit is the one asking for the bigger
+            # correction (a table whose right column is ragged keeps its
+            # well-placed left margin)
+            if np.ptp(np.polyval(fl[0], yy) - np.polyval(fr[0], yy)) > tol \
+                    and np.ptp(np.polyval(fl[0], yl)) > np.ptp(np.polyval(fr[0], yr)):
+                left_ok = False
 
     y0, y1 = fl[1]
     ys = np.clip(np.arange(H, dtype=np.float64), y0, y1)  # never extrapolate the fit
     xl = np.polyval(fl[0], ys)
-    if fr is not None:
+    if not left_ok:
+        r0, r1 = fr[1]
+        xr = np.polyval(fr[0], np.clip(np.arange(H, dtype=np.float64), r0, r1))
+        xl = xr - float(np.median(right - left))
+    elif fr is not None:
         r0, r1 = fr[1]
         xr = np.polyval(fr[0], np.clip(np.arange(H, dtype=np.float64), r0, r1))
     else:

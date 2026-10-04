@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+from scipy import ndimage
 from scipy.interpolate import BSpline, RectBivariateSpline
 
 X_INTERVALS = 10   # B-spline intervals across the text width (even spacing)
@@ -42,6 +43,7 @@ SMOOTH = 0.05      # second-difference penalty (relative)
 TRACE_RULES = True  # also trace horizontal printed lines (table grids, rules) as straight references
 TABLE_SECOND_PASS = True  # table pages (>= 3 traced grid lines): run the correction twice
 RULE_MIN_W = 0.12  # shortest traced line, as a fraction of the page width (one table column)
+LEADER_INK = 0.5  # _extend_right only takes blobs at least this dark (fraction of the way from text ink to paper); 0 = off
 EXTEND_LEADERS = True  # follow dot leaders / end numbers past a line's last letter (see _extend_right)
 USE_PREFIX = True  # sample article numbers / list markers at line starts (see _trace_baselines)
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
@@ -91,6 +93,16 @@ def _trace_baselines(gray: np.ndarray):
     cand &= (x > 2) & (y > 2) & (x + bw < w - 2) & (y + bh < h - 2)
     if cand.sum() < 30:
         return None, None, []
+    ink = None
+    if LEADER_INK > 0:
+        # darkest pixel of each blob (on the shading-normalised page, paper =
+        # 255). Show-through from the other side of the sheet binarises into
+        # faint specks; real print, dots of leaders included, is dark.
+        bgi = cv2.medianBlur(cv2.dilate(gray, np.ones((7, 7), np.uint8)), 31)
+        normi = cv2.divide(gray, bgi, scale=255)
+        dmin = ndimage.minimum(normi, lab, np.arange(1, n))
+        ref = float(np.median(dmin[cand]))
+        ink = dmin <= ref + LEADER_INK * (255.0 - ref)
     # typical letter height. Ignore marks much smaller than letters first:
     # dot leaders ("......" in contents pages, tables of cases) can outnumber
     # letters and would drag a plain median down to the size of a dot.
@@ -214,7 +226,7 @@ def _trace_baselines(gray: np.ndarray):
             xs_out = np.concatenate([[q[0] for q in pre], xs_out])
             ys_out = np.concatenate([[q[1] for q in pre], ys_out])
         if EXTEND_LEADERS:
-            xs_out, ys_out = _extend_right(xs_out, ys_out, st, cent, xh, w, h)
+            xs_out, ys_out = _extend_right(xs_out, ys_out, st, cent, xh, w, h, ink)
         traced.append((xs_out, ys_out))
     # Sparse pages only: all-capital lines (headings like "TABLE OF CONTENTS")
     # have no x-height letters, so they are never traced. On a page with only
@@ -484,7 +496,7 @@ def _trace_rules(binv: np.ndarray, xh: float):
     return out
 
 
-def _extend_right(xs, ys, st, cent, xh, w, h):
+def _extend_right(xs, ys, st, cent, xh, w, h, ink=None):
     """Follow a line past its last letter along dot leaders and the number
     at the end ("Samy v/s ... 2020 SCJ 306 ...............457/1").
 
@@ -498,6 +510,8 @@ def _extend_right(xs, ys, st, cent, xh, w, h):
     """
     x, y, bw, bh, area = (st[1:, i] for i in range(5))
     ok = (area >= 2) & (bh < 1.9 * xh) & (bw < 3 * xh) & (x > 2) & (y > 2) & (x + bw < w - 2) & (y + bh < h - 2)
+    if ink is not None:
+        ok &= ink  # never walk along faint show-through specks
     cx = cent[1:, 0][ok]
     by = (y + bh)[ok].astype(np.float64)
     o = np.argsort(xs)
