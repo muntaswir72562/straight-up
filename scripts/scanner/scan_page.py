@@ -14,6 +14,7 @@ import sys
 
 import cv2
 import numpy as np
+from scipy import ndimage
 
 from .detect import detect_document
 from .rectify import rectify
@@ -23,6 +24,9 @@ from straighten_pdf import (
     detect_skew_from_text, straighten_page,
     DETECT_WIDTH, MIN_SKEW_ANGLE, MIN_SKEW_CONFIDENCE,
 )
+
+
+SKEW_INK = 0.4  # skew from dark print only (0 = off): see _skew_angle
 
 
 def _skew_angle(gray: np.ndarray, max_deg: float = 6.0):
@@ -38,6 +42,25 @@ def _skew_angle(gray: np.ndarray, max_deg: float = 6.0):
     m = 0.03  # ignore a band along the photo border (page edges, shadows)
     hh, ww = binv.shape
     binv[:int(m * hh)], binv[-int(m * hh):], binv[:, :int(m * ww)], binv[:, -int(m * ww):] = 0, 0, 0, 0
+    if SKEW_INK > 0:
+        # Use printed text only: a library stamp, pencil notes or show-through
+        # from the back of the sheet are much lighter than print, and a tilted
+        # stamp (box lines, dotted fields) can outweigh a few short text rows.
+        # Keep blobs whose darkest pixel is near the darkest ink on the page.
+        bg = cv2.medianBlur(cv2.dilate(small, np.ones((7, 7), np.uint8)), 31)
+        norm = cv2.divide(small, bg, scale=255)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(binv, 8)
+        if n > 1:
+            dmin = ndimage.minimum(norm, lab, np.arange(1, n))
+            big = st[1:, 4] >= 10
+            if big.sum() >= 20:
+                ink = float(np.percentile(dmin[big], 10))
+                dark = dmin <= ink + SKEW_INK * (255.0 - ink)
+                lut = np.zeros(n, np.uint8)
+                lut[1:][dark] = 255
+                kept = lut[lab]
+                if np.count_nonzero(kept) >= 500:
+                    binv = kept
     ys, xs = np.nonzero(binv)
     if len(xs) < 500:
         return None
