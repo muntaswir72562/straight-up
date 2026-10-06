@@ -15,6 +15,7 @@ interface Job {
   tempDir: string;
   process: ChildProcess | null;
   ocrPages: string; // comma-separated 1-based page numbers
+  fixPages: string; // comma-separated 1-based page numbers for dewarp+clean (no OCR)
 }
 
 // Module-level job map (works in dev mode, single process)
@@ -28,9 +29,12 @@ function spawnPython(jobId: string, job: Job): void {
   const progressPath = join(job.tempDir, 'progress.json');
   const scriptPath = join(process.cwd(), 'scripts', 'replace_ocr.py');
 
-  const py = spawn('python', [
-    scriptPath, inputPath, outputPath, progressPath, job.ocrPages,
-  ], {
+  const args = [scriptPath, inputPath, outputPath, progressPath, job.ocrPages];
+  if (job.fixPages) {
+    args.push(job.fixPages);
+  }
+
+  const py = spawn('python', args, {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
@@ -67,8 +71,9 @@ function spawnPython(jobId: string, job: Job): void {
 
 async function handleCreate(formData: FormData) {
   const ocrPages = (formData.get('ocrPages') as string) || '';
-  if (!ocrPages) {
-    return NextResponse.json({ error: 'No OCR pages specified' }, { status: 400 });
+  const fixPages = (formData.get('fixPages') as string) || '';
+  if (!ocrPages && !fixPages) {
+    return NextResponse.json({ error: 'No pages specified for processing' }, { status: 400 });
   }
 
   const jobId = randomUUID();
@@ -80,7 +85,7 @@ async function handleCreate(formData: FormData) {
     JSON.stringify({ phase: 'preparing', current: 0, total: 0 }),
   );
 
-  jobs.set(jobId, { tempDir, process: null, ocrPages });
+  jobs.set(jobId, { tempDir, process: null, ocrPages, fixPages });
 
   return NextResponse.json({ jobId });
 }

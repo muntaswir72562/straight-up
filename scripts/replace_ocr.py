@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
 OCR specific pages of a PDF and overlay invisible searchable text.
+Optionally dewarp+clean other pages (from PDF sources) without OCR.
 
 Used by the Replace Pages pipeline to add OCR to replaced/inserted pages
-so the final PDF remains fully searchable.
+so the final PDF remains fully searchable. Pages sourced from PDFs get
+dewarp+clean instead of OCR (they already have text).
 
 Usage:
-  python replace_ocr.py <input> <output> <progress_file> <ocr_pages_csv>
+  python replace_ocr.py <input> <output> <progress_file> <ocr_pages_csv> [fix_pages_csv]
 
-  ocr_pages_csv: comma-separated 1-based page numbers to OCR, e.g. "1,3,5"
+  ocr_pages_csv:  comma-separated 1-based page numbers to OCR, e.g. "1,3,5"
+  fix_pages_csv:  comma-separated 1-based page numbers to dewarp+clean (no OCR)
 
 Progress is written to <progress_file> as JSON:
   {"phase": "ocr", "current": 3, "total": 5}
@@ -106,6 +109,68 @@ def _ocr_worker(args):
         return (pnum, None)
 
 
+# ── Fix worker (dewarp + clean) ──────────────────────────────────────
+
+JPEG_QUALITY = 92
+
+def _fix_worker(args):
+    """
+    Worker: render one page, dewarp, clean, return JPEG bytes.
+    Returns (page_num_1based, jpeg_bytes_or_None, (rect_w, rect_h))
+    """
+    (input_path, page_idx, total, cancel_path) = args
+    pnum = page_idx + 1
+
+    if _is_cancelled(cancel_path):
+        return (pnum, None, (0, 0))
+
+    try:
+        import fitz as _fitz
+        from clean_pdf import dewarp_page, clean_page
+
+        doc = _fitz.open(input_path)
+        page = doc[page_idx]
+        rect_w = page.rect.width
+        rect_h = page.rect.height
+
+        pix = page.get_pixmap(dpi=RENDER_DPI)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.h, pix.w, pix.n).copy()
+        n_ch = pix.n
+        del pix
+        doc.close()
+
+        if n_ch == 4:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+        elif n_ch == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img.copy()
+        del img
+
+        # Dewarp
+        dewarped, was_dewarped = dewarp_page(gray)
+        del gray
+        print(f"[replace-fix] Page {pnum}/{total}: dewarped={was_dewarped}",
+              file=sys.stderr)
+
+        # Clean
+        cleaned = clean_page(dewarped)
+        del dewarped
+        print(f"[replace-fix] Page {pnum}/{total}: cleaned", file=sys.stderr)
+
+        _, jpeg_buf = cv2.imencode('.jpg', cleaned,
+                                    [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        del cleaned
+        gc.collect()
+        return (pnum, jpeg_buf.tobytes(), (rect_w, rect_h))
+
+    except Exception as exc:
+        print(f"[replace-fix] Page {pnum} fix failed: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return (pnum, None, (0, 0))
+
+
 # ── Searchable PDF overlay ───────────────────────────────────────────
 
 def _build_searchable_pdf(output_path, ocr_results, ocr_page_set):
@@ -183,16 +248,96 @@ def _num_workers():
     return max(2, min(n, 4))
 
 
+def _run_fix_phase(input_path, output_path, fix_page_set, total_pages,
+                    progress_file, cancel_path):
+    """Dewarp + clean specific pages and replace them in the output PDF."""
+    fix_count = len(fix_page_set)
+    if fix_count == 0:
+        return
+
+    n_workers = _num_workers()
+    write_progress(progress_file, 'fixing', 0, fix_count)
+    print(f"[replace-fix] Starting dewarp+clean on {fix_count} pages "
+          f"({n_workers} workers)", file=sys.stderr)
+
+    ctx = multiprocessing.get_context('spawn')
+    pool = ctx.Pool(n_workers)
+
+    tasks = [
+        (input_path, pnum - 1, total_pages, cancel_path)
+        for pnum in sorted(fix_page_set)
+    ]
+
+    completed = 0
+
+    try:
+        results = []
+        for pnum, jpeg_bytes, rect_wh in pool.imap(_fix_worker, tasks):
+            if _is_cancelled(cancel_path):
+                print("[replace-fix] Cancelled, terminating pool",
+                      file=sys.stderr)
+                pool.terminate()
+                pool.join()
+                sys.exit(0)
+
+            completed += 1
+            write_progress(progress_file, 'fixing', completed, fix_count)
+
+            if jpeg_bytes is not None:
+                results.append((pnum, jpeg_bytes, rect_wh))
+                print(f"[replace-fix] Page {pnum}/{total_pages}: done",
+                      file=sys.stderr)
+            else:
+                print(f"[replace-fix] Page {pnum}/{total_pages}: "
+                      f"FAILED (kept original)", file=sys.stderr)
+    except Exception as exc:
+        print(f"[replace-fix] Pool error: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        pool.terminate()
+        pool.join()
+        raise
+    else:
+        pool.close()
+        pool.join()
+
+    # Replace fixed pages in the output PDF
+    if results:
+        write_progress(progress_file, 'saving', 0, 0)
+        doc = fitz.open(output_path)
+        for pnum, jpeg_bytes, (rect_w, rect_h) in results:
+            page_idx = pnum - 1
+            if page_idx >= len(doc):
+                continue
+            page = doc[page_idx]
+            w = page.rect.width
+            h = page.rect.height
+            # Delete and re-create page with fixed image
+            doc.delete_page(page_idx)
+            new_page = doc.new_page(page_idx, width=w, height=h)
+            new_page.insert_image(fitz.Rect(0, 0, w, h), stream=jpeg_bytes)
+            del jpeg_bytes
+
+        tmp_out = output_path + '.fix_tmp'
+        doc.save(tmp_out, garbage=3, deflate=True)
+        doc.close()
+        os.replace(tmp_out, output_path)
+        print(f"[replace-fix] Replaced {len(results)} pages with fixed versions",
+              file=sys.stderr)
+
+    gc.collect()
+
+
 def main():
     if len(sys.argv) < 5:
         print("Usage: python replace_ocr.py <input> <output> <progress_file> "
-              "<ocr_pages_csv>", file=sys.stderr)
+              "<ocr_pages_csv> [fix_pages_csv]", file=sys.stderr)
         sys.exit(1)
 
     input_path = sys.argv[1]
     output_path = sys.argv[2]
     progress_file = sys.argv[3]
     ocr_pages_csv = sys.argv[4]
+    fix_pages_csv = sys.argv[5] if len(sys.argv) > 5 else ''
 
     # Parse OCR page numbers (1-based)
     ocr_page_set = set()
@@ -201,15 +346,22 @@ def main():
         if tok.isdigit():
             ocr_page_set.add(int(tok))
 
-    if not ocr_page_set:
-        print("[replace-ocr] No valid page numbers to OCR", file=sys.stderr)
+    # Parse fix page numbers (1-based) — dewarp+clean, no OCR
+    fix_page_set = set()
+    for tok in fix_pages_csv.split(','):
+        tok = tok.strip()
+        if tok.isdigit():
+            fix_page_set.add(int(tok))
+
+    if not ocr_page_set and not fix_page_set:
+        print("[replace-ocr] No valid page numbers to process", file=sys.stderr)
         sys.exit(1)
 
     tmp_dir = os.path.dirname(os.path.abspath(output_path))
     cancel_path = os.path.join(tmp_dir, '_cancel')
 
     try:
-        # Copy input to output (we'll modify output in-place with OCR overlay)
+        # Copy input to output (we'll modify output in-place)
         shutil.copy2(input_path, output_path)
 
         doc = fitz.open(input_path)
@@ -218,76 +370,90 @@ def main():
 
         # Filter to only pages that actually exist
         ocr_page_set = {p for p in ocr_page_set if 1 <= p <= total_pages}
+        fix_page_set = {p for p in fix_page_set if 1 <= p <= total_pages}
         ocr_count = len(ocr_page_set)
+        fix_count = len(fix_page_set)
 
-        if ocr_count == 0:
+        if ocr_count == 0 and fix_count == 0:
             write_progress(progress_file, 'done', 0, 0)
             return
 
-        n_workers = _num_workers()
-        write_progress(progress_file, 'ocr', 0, ocr_count)
-        print(f"[replace-ocr] Starting OCR on {ocr_count} pages "
-              f"({n_workers} workers)", file=sys.stderr)
+        # --- Phase 1: Dewarp + clean fix pages ---
+        if fix_count > 0:
+            _run_fix_phase(input_path, output_path, fix_page_set,
+                           total_pages, progress_file, cancel_path)
 
-        ocr_out_dir = os.path.join(tmp_dir, 'ocr')
-        os.makedirs(ocr_out_dir, exist_ok=True)
+            if _is_cancelled(cancel_path):
+                sys.exit(0)
 
-        ctx = multiprocessing.get_context('spawn')
-        pool = ctx.Pool(n_workers)
+        # --- Phase 2: OCR ---
+        if ocr_count > 0:
+            n_workers = _num_workers()
+            write_progress(progress_file, 'ocr', 0, ocr_count)
+            print(f"[replace-ocr] Starting OCR on {ocr_count} pages "
+                  f"({n_workers} workers)", file=sys.stderr)
 
-        # Only OCR the specified pages
-        tasks = [
-            (input_path, pnum - 1, total_pages, cancel_path, ocr_out_dir)
-            for pnum in sorted(ocr_page_set)
-        ]
+            ocr_out_dir = os.path.join(tmp_dir, 'ocr')
+            os.makedirs(ocr_out_dir, exist_ok=True)
 
-        completed = 0
-        succeeded = 0
-        all_results = []
+            ctx = multiprocessing.get_context('spawn')
+            pool = ctx.Pool(n_workers)
 
-        try:
-            for pnum, result in pool.imap_unordered(_ocr_worker, tasks):
-                if _is_cancelled(cancel_path):
-                    print("[replace-ocr] Cancelled, terminating pool",
-                          file=sys.stderr)
-                    pool.terminate()
-                    pool.join()
-                    sys.exit(0)
+            # OCR reads from output_path so fix-phase changes (dewarp/clean)
+            # are visible to the OCR workers
+            ocr_source = output_path
+            tasks = [
+                (ocr_source, pnum - 1, total_pages, cancel_path, ocr_out_dir)
+                for pnum in sorted(ocr_page_set)
+            ]
 
-                completed += 1
-                write_progress(progress_file, 'ocr', completed, ocr_count)
+            completed = 0
+            succeeded = 0
+            all_results = []
 
-                if result is not None:
-                    succeeded += 1
-                    all_results.append(result)
-                    conf = result.get('mean_conf', 0)
-                    words = sum(
-                        len(l.get('words', []))
-                        for b in result.get('blocks', [])
-                        for l in b.get('lines', [])
-                    )
-                    print(f"[replace-ocr] Page {pnum}/{total_pages}: "
-                          f"conf={conf:.1f} words={words}", file=sys.stderr)
-                else:
-                    print(f"[replace-ocr] Page {pnum}/{total_pages}: "
-                          f"FAILED (skipped)", file=sys.stderr)
-        except Exception as exc:
-            print(f"[replace-ocr] Pool error: {exc}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            pool.terminate()
-            pool.join()
-            raise
-        else:
-            pool.close()
-            pool.join()
+            try:
+                for pnum, result in pool.imap_unordered(_ocr_worker, tasks):
+                    if _is_cancelled(cancel_path):
+                        print("[replace-ocr] Cancelled, terminating pool",
+                              file=sys.stderr)
+                        pool.terminate()
+                        pool.join()
+                        sys.exit(0)
 
-        print(f"[replace-ocr] OCR done. {succeeded}/{ocr_count} pages succeeded.",
-              file=sys.stderr)
+                    completed += 1
+                    write_progress(progress_file, 'ocr', completed, ocr_count)
 
-        # Build searchable PDF overlay
-        if all_results:
-            write_progress(progress_file, 'saving', 0, 0)
-            _build_searchable_pdf(output_path, all_results, ocr_page_set)
+                    if result is not None:
+                        succeeded += 1
+                        all_results.append(result)
+                        conf = result.get('mean_conf', 0)
+                        words = sum(
+                            len(l.get('words', []))
+                            for b in result.get('blocks', [])
+                            for l in b.get('lines', [])
+                        )
+                        print(f"[replace-ocr] Page {pnum}/{total_pages}: "
+                              f"conf={conf:.1f} words={words}", file=sys.stderr)
+                    else:
+                        print(f"[replace-ocr] Page {pnum}/{total_pages}: "
+                              f"FAILED (skipped)", file=sys.stderr)
+            except Exception as exc:
+                print(f"[replace-ocr] Pool error: {exc}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                pool.terminate()
+                pool.join()
+                raise
+            else:
+                pool.close()
+                pool.join()
+
+            print(f"[replace-ocr] OCR done. {succeeded}/{ocr_count} pages succeeded.",
+                  file=sys.stderr)
+
+            # Build searchable PDF overlay
+            if all_results:
+                write_progress(progress_file, 'saving', 0, 0)
+                _build_searchable_pdf(output_path, all_results, ocr_page_set)
 
         write_progress(progress_file, 'done', total_pages, total_pages)
 

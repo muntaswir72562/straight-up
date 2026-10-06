@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { renderFilePreview } from '@/lib/pdf/filePreview';
 
 interface InsertedPageThumbnailProps {
   file: File;
@@ -18,9 +19,25 @@ export function InsertedPageThumbnail({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
+    let cancelled = false;
+
+    renderFilePreview(file).then((url) => {
+      if (cancelled) {
+        URL.revokeObjectURL(url);
+      } else {
+        setPreviewUrl(url);
+      }
+    }).catch(() => {
+      if (!cancelled) setPreviewUrl(null);
+    });
+
+    return () => {
+      cancelled = true;
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+    };
   }, [file]);
 
   const handleRemove = useCallback(

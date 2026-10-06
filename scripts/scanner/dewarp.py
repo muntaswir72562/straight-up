@@ -51,7 +51,7 @@ TRACE_PIECES = True  # also measure short text pieces (a date column, a column o
 JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_groups)
 VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to the traced span's ends (see _virtual_ext)
 FAR_SLOPE = True   # beyond EXTRAP_X, continue the field with the lines' average slope (page skew) instead of holding flat
-EDGE_FOLD = True   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
+EDGE_FOLD = False   # sharp curl in the last/first word of the lines (page folding over at the edge): add knots there (see _edge_knots)
 FOLD_SMOOTH = 0.01  # smoothness when edge knots are used: a fold needs a sharp bend the normal penalty flattens
 MAX_TILT = 0       # (tested, off: steep corrections are legitimate on page-edge folds; a cap undid them)
 SPARSE_ROWS = 10   # pages with fewer text rows than this ...
@@ -59,6 +59,8 @@ SPARSE_MIN_BEND = 0.4  # ... are only corrected when the bend is at least this m
 CAPS_LINES = True   # trace all-capital heading lines as straight references ...
 CAPS_MAX_ROWS = 4   # ... but only on pages with fewer traced lines than this
 FEW_ROWS = 6       # pages with fewer text rows use the simple shape (at most quadratic down the page, 4 intervals across): 4-5 rows can't pin a cubic, it swings between them
+SPLIT_JUMPS = 1.0  # split a traced baseline where it hops to the next row (letter heights; 0 = off)
+SPLIT_GAP = 8.0  # page rejected as 'correction implausible': dewarp blocks separated by an EMPTY band taller than this many letter heights on their own (0 = off)
 MAX_SHIFT = 6.0   # refuse a correction that moves text by more than this x max(measured bend, letter height)
 TRIM_ENDS = True   # drop a stray first/last baseline sample (raised opening quote, bullet) that jumps off the line (see _trim_ends)
 OUTLIER = 0.65     # drop a glyph whose bottom is this many letter heights off its neighbours (raised "°", footnote marks)
@@ -657,7 +659,125 @@ def _basis(xs, ts, x0, x1, t0, t1, nt):
     return (bx[:, :, None] * bt[:, None, :]).reshape(len(xs), -1)
 
 
-def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: bool = False) -> tuple[np.ndarray, DewarpInfo]:
+def _empty_gaps(gray, traced, xh):
+    """Work-scale y positions to cut the page at: the middle of every band
+    taller than SPLIT_GAP letter heights between two traced rows that holds
+    no printed text at all (a short page: two lines at the top, footnotes at
+    the bottom). One smooth field for the whole page has nothing to hold it
+    in such a band and swings wildly there; each block on its own is fine."""
+    rws = np.array([float(np.median(ys)) for _, ys in traced])
+    o = np.argsort(rws)
+    rws = rws[o]
+    top = np.array([float(traced[i][1].min()) for i in o])     # highest baseline sample of each line
+    bot = np.array([float(traced[i][1].max()) for i in o])     # lowest
+    gaps = []
+    for k in np.nonzero(np.diff(rws) > SPLIT_GAP * xh)[0]:
+        # the band must clear every line above (its lowest sample) and below
+        # (its highest one) - a curled line is not level
+        a = float(bot[:k + 1].max())
+        b = float(top[k + 1:].min())
+        if b - a > SPLIT_GAP * xh * 0.75:
+            gaps.append((a, b))
+    if not gaps:
+        return []
+    binv = _binarize(gray)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(binv, 8)
+    x, y, bw, bh, area = (st[1:, i] for i in range(5))
+    bgi = cv2.medianBlur(cv2.dilate(gray, np.ones((7, 7), np.uint8)), 31)
+    normi = cv2.divide(gray, bgi, scale=255)
+    dmin = ndimage.minimum(normi, lab, np.arange(1, n)) if n > 1 else np.zeros(0)
+    glyph = (area > 6) & (bh > 0.35 * xh) & (bh < 0.06 * gray.shape[0]) & (bw < 3 * xh)  # not rules
+    if glyph.sum() < 20:
+        return []
+    ref = float(np.median(dmin[glyph]))
+    ink = glyph & (dmin <= ref + 0.5 * (255.0 - ref))
+    cuts = []
+    rowink = (binv > 0).sum(axis=1)
+    for a, b in gaps:
+        # rows a, b are baselines: the band between them is clear of
+        # their text from a + 0.5 xh (descenders) to b - 1.5 xh (ascenders)
+        lo, hi = a + 0.5 * xh, b - 1.5 * xh
+        # no printed glyph at all may sit in the band (a lone section letter
+        # "E" between two blocks of a table counts)
+        if ((y + bh > lo) & (y < hi) & ink).any():
+            continue
+        # cut on the cleanest pixel row near the middle (never through a
+        # rule or a speck)
+        r0, r1 = int(np.ceil(lo + 0.25 * (hi - lo))), int(np.floor(hi - 0.25 * (hi - lo)))
+        if r1 <= r0:
+            continue
+        seg = rowink[r0:r1]
+        best = np.nonzero(seg == seg.min())[0]
+        mid = 0.5 * (r1 - r0)
+        cuts.append(float(r0 + best[np.argmin(np.abs(best - mid))]))
+    return cuts
+
+
+def _dewarp_bands(img, cuts, work_side):
+    """Dewarp each horizontal band between cuts on its own (see _empty_gaps)."""
+    H = img.shape[0]
+    edges = [0] + [int(round(c)) for c in cuts] + [H]
+    out = img.copy()
+    info = DewarpInfo(False, 0, reason="page already straight")
+    reasons = []
+    for y0, y1 in zip(edges[:-1], edges[1:]):
+        if y1 - y0 < 8:
+            continue
+        o, bi = dewarp(img[y0:y1], work_side, _band=True)
+        reasons.append(bi.reason)
+        info.lines += bi.lines
+        if bi.applied:
+            out[y0:y1] = o
+            info.applied = True
+            info.before_px = max(info.before_px, bi.before_px)
+            info.after_px = max(info.after_px, bi.after_px)
+        if bi.debug_lines:
+            info.debug_lines = (info.debug_lines or []) + [(xs, ys + y0) for xs, ys in bi.debug_lines]
+    if info.applied:
+        info.reason = "ok"
+    elif reasons:
+        info.reason = reasons[0] if all(r == reasons[0] for r in reasons) else "page already straight"
+    return out, info
+
+
+def _split_jumps(traced, xh):
+    """Cut a traced baseline where it jumps to the next row.
+
+    Tightly set footnotes in a curled corner: the rows tilt so much that the
+    letters of two rows join into one line blob, and the trace hops between
+    them ("... [2007] UKHL" of one row followed by "27; [2007]" of the row
+    below). Fitting that as one line drags whole words a row up or down.
+    Where a sample is more than SPLIT_JUMPS letter heights off the line
+    continued from the samples before it, start a new line there. Each part
+    gets its own row in the fit, so the tilt information is kept. Ordinary
+    lines never jump that far between neighbouring letters, so they are
+    returned unchanged.
+    """
+    out = []
+    for xs, ys in traced:
+        o = np.argsort(xs)
+        xs_, ys_ = np.asarray(xs)[o], np.asarray(ys)[o]
+        cut = [0]
+        for i in range(1, len(xs_)):
+            a = cut[-1]
+            k0 = max(a, i - 4)
+            if i - k0 >= 2:
+                pr = np.polyval(np.polyfit(xs_[k0:i], ys_[k0:i], 1), xs_[i])
+            else:
+                pr = ys_[i - 1]
+            if abs(ys_[i] - pr) > SPLIT_JUMPS * xh:
+                cut.append(i)
+        if len(cut) == 1:
+            out.append((xs, ys))
+            continue
+        cut.append(len(xs_))
+        for a, b in zip(cut[:-1], cut[1:]):
+            if b - a >= 3:
+                out.append((xs_[a:b], ys_[a:b]))
+    return out
+
+
+def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: bool = False, _band: bool = False) -> tuple[np.ndarray, DewarpInfo]:
     H, W = img.shape[:2]
     s = min(2.5, work_side / max(H, W))
     small = cv2.resize(img, (int(W * s), int(H * s)), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
@@ -667,10 +787,25 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
     traced, xh, pieces = _trace_baselines(gray)
     if not traced or len(traced) < 2:
         return img, DewarpInfo(False, len(traced or []), reason="not enough text lines")
+    if SPLIT_JUMPS > 0:
+        traced = _split_jumps(traced, xh)
     # count distinct ROWS, not traced pieces: two pieces of the same row
     # (a line broken by a wide gap) pin down nothing more down the page
     rws = np.sort([float(np.median(ys)) for _, ys in traced])
     n_rows = 1 + int((np.diff(rws) > 1.0 * xh).sum())
+    if SPLIT_GAP > 0 and not _band and not _few and not _second:
+        # Whole page first. Only when that fit swings implausibly far (see
+        # MAX_SHIFT) and the page is made of blocks separated by an empty band,
+        # dewarp each block on its own (see _empty_gaps).
+        out, info = dewarp(img, work_side, _band=True)
+        if info.applied or info.reason != "correction implausible":
+            return out, info
+        cuts = _empty_gaps(gray, traced, xh)
+        if cuts:
+            o2, i2 = _dewarp_bands(img, [c / s for c in cuts], work_side)
+            if i2.applied:
+                return o2, i2
+        return out, info
     if n_rows < FEW_ROWS and not _few:
         # Short pages (a table of cases with 2-3 entries): still correct them,
         # but with a simpler shape that 2-3 lines can actually pin down —
@@ -679,7 +814,7 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
         saved = (T_DEG, X_INTERVALS)
         T_DEG, X_INTERVALS = min(max(n_rows - 1, 0), 2), 4
         try:
-            return dewarp(img, work_side, _few=True, _second=_second)
+            return dewarp(img, work_side, _few=True, _second=_second, _band=_band)
         finally:
             T_DEG, X_INTERVALS = saved
 

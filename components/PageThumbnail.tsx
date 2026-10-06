@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { renderThumbnail } from '@/lib/pdf/thumbnail';
+import { renderFilePreview } from '@/lib/pdf/filePreview';
 import { THUMBNAIL_WIDTH } from '@/lib/constants';
 
 interface PageThumbnailProps {
@@ -18,9 +19,15 @@ interface PageThumbnailProps {
   onUndoDelete: (pageNumber: number) => void;
 }
 
-function isImageFile(file: File): boolean {
+function isAcceptedFile(file: File): boolean {
   return /^image\/(jpeg|png|webp)$/.test(file.type) ||
-    /\.(jpe?g|png|webp)$/i.test(file.name);
+    /\.(jpe?g|png|webp)$/i.test(file.name) ||
+    file.type === 'application/pdf' ||
+    /\.pdf$/i.test(file.name);
+}
+
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
 }
 
 export function PageThumbnail({
@@ -98,14 +105,28 @@ export function PageThumbnail({
       return;
     }
 
-    const url = URL.createObjectURL(replacement);
-    setReplacementUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return url;
+    let cancelled = false;
+
+    renderFilePreview(replacement).then((url) => {
+      if (cancelled) {
+        URL.revokeObjectURL(url);
+      } else {
+        setReplacementUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+      }
+    }).catch(() => {
+      // Fallback for unsupported files
+      if (!cancelled) setReplacementUrl(null);
     });
 
     return () => {
-      URL.revokeObjectURL(url);
+      cancelled = true;
+      setReplacementUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
     };
   }, [replacement]);
 
@@ -145,7 +166,7 @@ export function PageThumbnail({
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const f = e.target.files?.[0];
-      if (f && isImageFile(f)) {
+      if (f && isAcceptedFile(f)) {
         onReplace(pageNumber, f);
       }
       e.target.value = '';
@@ -213,8 +234,8 @@ export function PageThumbnail({
       if (locked) return;
 
       const files = Array.from(e.dataTransfer.files);
-      const img = files.find(isImageFile);
-      if (img) onReplace(pageNumber, img);
+      const accepted = files.find(isAcceptedFile);
+      if (accepted) onReplace(pageNumber, accepted);
     },
     [locked, onReplace, pageNumber]
   );
@@ -262,7 +283,7 @@ export function PageThumbnail({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,application/pdf,.pdf"
         className="hidden"
         onChange={handleFileChange}
         tabIndex={-1}

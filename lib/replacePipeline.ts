@@ -1,9 +1,13 @@
 import { PDFDocument } from 'pdf-lib';
 import { assemblePdf, type AssemblePage } from './pdf/assemble';
 import { sanitizeBookName } from './filename';
-import { JPEG_QUALITY, MAX_RENDER_DIMENSION } from './constants';
+import { JPEG_QUALITY, MAX_RENDER_DIMENSION, RENDER_DPI } from './constants';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
 import type { Insertion } from '@/components/PageGrid';
+
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+}
 
 /** Upload chunk size — 400 MB */
 const CHUNK_SIZE = 400 * 1024 * 1024;
@@ -54,11 +58,68 @@ async function imageFileToJpeg(file: File, quality: number): Promise<Uint8Array>
 }
 
 /**
+ * Convert the first page of a PDF File to JPEG bytes via pdfjs-dist + canvas.
+ */
+async function pdfFileToJpeg(file: File, quality: number): Promise<Uint8Array> {
+  const { loadPdfDocument } = await import('@/lib/pdf/render');
+
+  const pdf = await loadPdfDocument(file);
+  try {
+    const page = await pdf.getPage(1);
+    const viewport1 = page.getViewport({ scale: 1 });
+
+    let scale = RENDER_DPI / 72;
+    let w = Math.round(viewport1.width * scale);
+    let h = Math.round(viewport1.height * scale);
+
+    const maxDim = Math.max(w, h);
+    if (maxDim > MAX_RENDER_DIMENSION) {
+      scale *= MAX_RENDER_DIMENSION / maxDim;
+      w = Math.round(viewport1.width * scale);
+      h = Math.round(viewport1.height * scale);
+    }
+
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    page.cleanup();
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('Canvas toBlob failed'))),
+        'image/jpeg',
+        quality
+      );
+    });
+
+    const buffer = await blob.arrayBuffer();
+    return new Uint8Array(buffer);
+  } finally {
+    pdf.destroy();
+  }
+}
+
+/**
+ * Convert a File (image or PDF) to JPEG bytes.
+ */
+async function fileToJpeg(file: File, quality: number): Promise<Uint8Array> {
+  if (isPdfFile(file)) {
+    return pdfFileToJpeg(file, quality);
+  }
+  return imageFileToJpeg(file, quality);
+}
+
+/**
  * Upload assembled PDF to server, run OCR on specific pages, poll, download.
  */
 async function runOcrOnServer(
   pdfBlob: Blob,
   ocrPageIndices: number[],
+  fixPageIndices: number[],
   bookName: string,
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
@@ -71,6 +132,9 @@ async function runOcrOnServer(
   const createForm = new FormData();
   createForm.append('action', 'create');
   createForm.append('ocrPages', ocrPageIndices.join(','));
+  if (fixPageIndices.length > 0) {
+    createForm.append('fixPages', fixPageIndices.join(','));
+  }
 
   const createRes = await fetch(apiBase, { method: 'POST', body: createForm });
   if (!createRes.ok) {
@@ -214,26 +278,29 @@ export async function runReplacePipeline(
 
   if (cancelRef.cancelled) throw new Error('Cancelled');
 
-  // Convert replacement images to JPEG
+  // Convert replacement files (images or PDFs) to JPEG
   const convertedReplacements = new Map<number, Uint8Array>();
+  const pdfReplacementPages = new Set<number>(); // track which replacements are from PDFs
   const replacementEntries = Array.from(replacements.entries());
 
   for (let i = 0; i < replacementEntries.length; i++) {
     if (cancelRef.cancelled) throw new Error('Cancelled');
 
-    const [pageNum, imgFile] = replacementEntries[i];
+    const [pageNum, srcFile] = replacementEntries[i];
     onProgress({
       phase: 'preparing' as PipelinePhase,
       current: i + 1,
       total: replacementEntries.length + insertions.length,
     });
 
-    const jpegBytes = await imageFileToJpeg(imgFile, JPEG_QUALITY);
+    if (isPdfFile(srcFile)) pdfReplacementPages.add(pageNum);
+    const jpegBytes = await fileToJpeg(srcFile, JPEG_QUALITY);
     convertedReplacements.set(pageNum, jpegBytes);
   }
 
-  // Convert insertion images to JPEG
+  // Convert insertion files (images or PDFs) to JPEG
   const convertedInsertions = new Map<string, Uint8Array>();
+  const pdfInsertionIds = new Set<string>(); // track which insertions are from PDFs
 
   for (let i = 0; i < insertions.length; i++) {
     if (cancelRef.cancelled) throw new Error('Cancelled');
@@ -245,7 +312,8 @@ export async function runReplacePipeline(
       total: replacementEntries.length + insertions.length,
     });
 
-    const jpegBytes = await imageFileToJpeg(ins.file, JPEG_QUALITY);
+    if (isPdfFile(ins.file)) pdfInsertionIds.add(ins.id);
+    const jpegBytes = await fileToJpeg(ins.file, JPEG_QUALITY);
     convertedInsertions.set(ins.id, jpegBytes);
   }
 
@@ -271,6 +339,7 @@ export async function runReplacePipeline(
   // Build the assembly plan in output order
   const assemblePages: AssemblePage[] = [];
   const ocrPageIndices: number[] = []; // 1-based output page numbers needing OCR
+  const fixPageIndices: number[] = []; // 1-based output page numbers needing dewarp+clean (PDF sources)
   let outputIndex = 0;
 
   // Insertions before page 1 (afterPage === 0)
@@ -284,6 +353,9 @@ export async function runReplacePipeline(
       pageSizePoints: pageSize,
     });
     ocrPageIndices.push(outputIndex);
+    if (pdfInsertionIds.has(ins.id)) {
+      fixPageIndices.push(outputIndex);
+    }
   }
 
   for (let i = 0; i < totalPages; i++) {
@@ -302,6 +374,9 @@ export async function runReplacePipeline(
           pageSizePoints: { width, height },
         });
         ocrPageIndices.push(outputIndex);
+        if (pdfReplacementPages.has(pageNum)) {
+          fixPageIndices.push(outputIndex);
+        }
       } else {
         assemblePages.push({ kind: 'untouched', pdfIndex: 0, pageIndex: i });
       }
@@ -318,6 +393,9 @@ export async function runReplacePipeline(
         pageSizePoints: pageSize,
       });
       ocrPageIndices.push(outputIndex);
+      if (pdfInsertionIds.has(ins.id)) {
+        fixPageIndices.push(outputIndex);
+      }
     }
   }
 
@@ -339,11 +417,11 @@ export async function runReplacePipeline(
   const filename = `${safeName}.pdf`;
   const blob = new Blob([merged.buffer as ArrayBuffer], { type: 'application/pdf' });
 
-  // If no pages need OCR (delete-only), return directly
-  if (ocrPageIndices.length === 0) {
+  // If no pages need server processing (delete-only), return directly
+  if (ocrPageIndices.length === 0 && fixPageIndices.length === 0) {
     return { blob, filename, totalPages: outputTotalPages, angles: [] };
   }
 
-  // Pages need OCR — upload to server
-  return runOcrOnServer(blob, ocrPageIndices, bookName, onProgress, cancelRef);
+  // Pages need server processing (OCR and/or dewarp+clean)
+  return runOcrOnServer(blob, ocrPageIndices, fixPageIndices, bookName, onProgress, cancelRef);
 }

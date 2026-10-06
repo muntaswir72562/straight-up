@@ -26,9 +26,11 @@ interface PageGridProps {
   onRemoveInsert: (id: string) => void;
 }
 
-function isImageFile(file: File): boolean {
+function isAcceptedFile(file: File): boolean {
   return /^image\/(jpeg|png|webp)$/.test(file.type) ||
-    /\.(jpe?g|png|webp)$/i.test(file.name);
+    /\.(jpe?g|png|webp)$/i.test(file.name) ||
+    file.type === 'application/pdf' ||
+    /\.pdf$/i.test(file.name);
 }
 
 function InsertHoverZone({
@@ -57,7 +59,7 @@ function InsertHoverZone({
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const f = e.target.files?.[0];
-      if (f && isImageFile(f)) {
+      if (f && isAcceptedFile(f)) {
         onInsert(afterPage, f);
       }
       e.target.value = '';
@@ -89,7 +91,7 @@ function InsertHoverZone({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,application/pdf,.pdf"
         className="hidden"
         onChange={handleFileChange}
         tabIndex={-1}
