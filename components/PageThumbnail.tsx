@@ -13,6 +13,7 @@ interface PageThumbnailProps {
   replacement: File | null;
   locked: boolean;
   isDeleted: boolean;
+  onPageClick: (pageNumber: number) => void;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
   onDelete: (pageNumber: number) => void;
@@ -37,6 +38,7 @@ export function PageThumbnail({
   replacement,
   locked,
   isDeleted,
+  onPageClick,
   onReplace,
   onUndoReplace,
   onDelete,
@@ -145,8 +147,8 @@ export function PageThumbnail({
       onUndoDelete(pageNumber);
       return;
     }
-    fileInputRef.current?.click();
-  }, [locked, isDeleted, onUndoDelete, pageNumber]);
+    onPageClick(pageNumber);
+  }, [locked, isDeleted, onUndoDelete, onPageClick, pageNumber]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -156,11 +158,11 @@ export function PageThumbnail({
         if (isDeleted) {
           onUndoDelete(pageNumber);
         } else {
-          fileInputRef.current?.click();
+          onPageClick(pageNumber);
         }
       }
     },
-    [locked, isDeleted, onUndoDelete, pageNumber]
+    [locked, isDeleted, onUndoDelete, onPageClick, pageNumber]
   );
 
   const handleFileChange = useCallback(
@@ -172,6 +174,15 @@ export function PageThumbnail({
       e.target.value = '';
     },
     [onReplace, pageNumber]
+  );
+
+  const handleReplaceClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (locked) return;
+      fileInputRef.current?.click();
+    },
+    [locked]
   );
 
   const handleUndo = useCallback(
@@ -254,8 +265,8 @@ export function PageThumbnail({
         isDeleted
           ? `Page ${pageNumber} of ${totalPages} (deleted). Click to undo.`
           : isReplaced
-            ? `Page ${pageNumber} of ${totalPages} (replaced). Click to change or press undo.`
-            : `Page ${pageNumber} of ${totalPages}. Click to replace.`
+            ? `Page ${pageNumber} of ${totalPages} (replaced). Click to view.`
+            : `Page ${pageNumber} of ${totalPages}. Click to view.`
       }
       className="focus-ring relative cursor-pointer select-none overflow-hidden"
       style={{
@@ -405,33 +416,53 @@ export function PageThumbnail({
         </button>
       )}
 
-      {/* Delete button — bottom left (when not deleted and not locked) */}
+      {/* Action buttons — bottom left (when not deleted and not locked) */}
       {!isDeleted && !locked && (
-        <button
-          type="button"
-          onClick={handleDelete}
-          className="focus-ring flex items-center justify-center"
-          style={{
-            position: 'absolute',
-            bottom: 4,
-            left: 4,
-            width: 22,
-            height: 22,
-            background: 'oklch(15% 0.02 270 / 0.7)',
-            border: 'none',
-            borderRadius: 'var(--radius-sm)',
-            color: '#fff',
-            cursor: 'pointer',
-            padding: 0,
-            zIndex: 10,
-          }}
-          aria-label={`Delete page ${pageNumber}`}
-        >
-          {/* Trash icon */}
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M1.5 3h9M4.5 3V1.5h3V3M3 3v7.5h6V3" />
-          </svg>
-        </button>
+        <div style={{ position: 'absolute', bottom: 4, left: 4, display: 'flex', gap: 3, zIndex: 10 }}>
+          {/* Delete button */}
+          <button
+            type="button"
+            onClick={handleDelete}
+            className="focus-ring flex items-center justify-center"
+            style={{
+              width: 22,
+              height: 22,
+              background: 'oklch(15% 0.02 270 / 0.7)',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              color: '#fff',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+            aria-label={`Delete page ${pageNumber}`}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1.5 3h9M4.5 3V1.5h3V3M3 3v7.5h6V3" />
+            </svg>
+          </button>
+          {/* Replace button */}
+          <button
+            type="button"
+            onClick={handleReplaceClick}
+            className="focus-ring flex items-center justify-center"
+            style={{
+              width: 22,
+              height: 22,
+              background: 'oklch(15% 0.02 270 / 0.7)',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              color: '#fff',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+            aria-label={`Replace page ${pageNumber}`}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 4h10M8 1l3 3-3 3" />
+              <path d="M11 8H1M4 11l-3-3 3-3" />
+            </svg>
+          </button>
+        </div>
       )}
 
       {/* Undo delete button — bottom left (when deleted) */}
@@ -464,8 +495,8 @@ export function PageThumbnail({
         </button>
       )}
 
-      {/* Hover overlay when not replaced and not deleted */}
-      {!isReplaced && !isDeleted && displayUrl && !isDragOver && (
+      {/* Hover overlay — eye icon hint for click-to-view */}
+      {!isDeleted && displayUrl && !isDragOver && (
         <div
           className="flex items-center justify-center"
           style={{
@@ -493,9 +524,8 @@ export function PageThumbnail({
             style={{ opacity: 0, transition: 'opacity var(--duration-fast) var(--ease-out-expo)' }}
             className="thumbnail-replace-icon"
           >
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" y1="15" x2="12" y2="3" />
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+            <circle cx="12" cy="12" r="3" />
           </svg>
         </div>
       )}

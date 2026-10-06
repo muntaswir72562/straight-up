@@ -18,12 +18,14 @@ interface PageGridProps {
   deletions: Set<number>;
   insertions: Insertion[];
   locked: boolean;
+  onPageClick: (pageNumber: number) => void;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
   onDelete: (pageNumber: number) => void;
   onUndoDelete: (pageNumber: number) => void;
   onInsert: (afterPage: number, file: File) => void;
   onRemoveInsert: (id: string) => void;
+  onOpenFullscreen: () => void;
 }
 
 function isAcceptedFile(file: File): boolean {
@@ -128,12 +130,14 @@ export function PageGrid({
   deletions,
   insertions,
   locked,
+  onPageClick,
   onReplace,
   onUndoReplace,
   onDelete,
   onUndoDelete,
   onInsert,
   onRemoveInsert,
+  onOpenFullscreen,
 }: PageGridProps) {
   const replaceCount = replacements.size;
   const deleteCount = deletions.size;
@@ -165,12 +169,33 @@ export function PageGrid({
     <div>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <h2
-          className="text-sm font-semibold uppercase tracking-wider"
-          style={{ color: 'var(--color-ink-muted)' }}
-        >
-          Pages
-        </h2>
+        <div className="flex items-center gap-3">
+          <h2
+            className="text-sm font-semibold uppercase tracking-wider"
+            style={{ color: 'var(--color-ink-muted)' }}
+          >
+            Pages
+          </h2>
+          {!locked && (
+            <button
+              type="button"
+              onClick={onOpenFullscreen}
+              className="focus-ring flex items-center gap-1.5 text-xs font-medium px-2.5 py-1"
+              style={{
+                background: 'var(--color-primary-subtle)',
+                color: 'var(--color-primary)',
+                borderRadius: 'var(--radius-sm)',
+                border: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8" />
+              </svg>
+              Fullscreen
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-3 flex-wrap justify-end">
           {replaceCount > 0 && (
             <span
@@ -260,6 +285,7 @@ export function PageGrid({
                 replacement={replacements.get(pageNum) ?? null}
                 locked={locked}
                 isDeleted={deletions.has(pageNum)}
+                onPageClick={onPageClick}
                 onReplace={onReplace}
                 onUndoReplace={onUndoReplace}
                 onDelete={onDelete}

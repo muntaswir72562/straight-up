@@ -16,6 +16,8 @@ import { FixDropZone } from './FixDropZone';
 import { PageGrid, type Insertion } from './PageGrid';
 import { ProgressPanel } from './ProgressPanel';
 import { ResultPanel } from './ResultPanel';
+import { PageViewModal } from './PageViewModal';
+import { FullscreenViewer } from './FullscreenViewer';
 
 type ToolMode = 'merge' | 'fullfix' | 'replace';
 
@@ -73,6 +75,8 @@ export function BookScanTool() {
   const [deletions, setDeletions] = useState<Set<number>>(new Set());
   const [insertions, setInsertions] = useState<Insertion[]>([]);
   const [replacePdf, setReplacePdf] = useState<PDFDocumentProxy | null>(null);
+  const [viewingPage, setViewingPage] = useState<number | null>(null);
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
 
   // --- Shared state ---
   const [status, setStatus] = useState<AppStatus>('idle');
@@ -540,6 +544,15 @@ export function BookScanTool() {
     setInsertions((prev) => prev.filter((ins) => ins.id !== id));
   }, []);
 
+  const handlePageClick = useCallback((pageNumber: number) => {
+    setViewingPage(pageNumber);
+  }, []);
+
+  const handleOpenFullscreen = useCallback((initialPage?: number) => {
+    setViewingPage(null);
+    setFullscreenOpen(true);
+  }, []);
+
   // --- Clean up PDFs on unmount ---
   useEffect(() => {
     return () => {
@@ -732,6 +745,7 @@ export function BookScanTool() {
   }
 
   return (
+    <>
     <main
       className="flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12"
       style={{ maxWidth: '56rem' }}
@@ -937,12 +951,14 @@ export function BookScanTool() {
               deletions={deletions}
               insertions={insertions}
               locked={locked}
+              onPageClick={handlePageClick}
               onReplace={handleReplace}
               onUndoReplace={handleUndoReplace}
               onDelete={handleDelete}
               onUndoDelete={handleUndoDelete}
               onInsert={handleInsert}
               onRemoveInsert={handleRemoveInsert}
+              onOpenFullscreen={handleOpenFullscreen}
             />
           )}
         </section>
@@ -1444,5 +1460,42 @@ export function BookScanTool() {
         </div>
       )}
     </main>
+
+    {/* Page View Modal */}
+    {viewingPage !== null && replacePdf && replacePageCount && (
+      <PageViewModal
+        pdf={replacePdf}
+        pageNumber={viewingPage}
+        totalPages={replacePageCount}
+        replacement={replacements.get(viewingPage) ?? null}
+        isDeleted={deletions.has(viewingPage)}
+        onClose={() => setViewingPage(null)}
+        onNavigate={(pn) => setViewingPage(pn)}
+        onOpenFullscreen={(pn) => {
+          setViewingPage(null);
+          setFullscreenOpen(true);
+        }}
+      />
+    )}
+
+    {/* Fullscreen Viewer */}
+    {fullscreenOpen && replacePdf && replacePageCount && (
+      <FullscreenViewer
+        pdf={replacePdf}
+        totalPages={replacePageCount}
+        replacements={replacements}
+        deletions={deletions}
+        insertions={insertions}
+        locked={locked}
+        onClose={() => setFullscreenOpen(false)}
+        onReplace={handleReplace}
+        onUndoReplace={handleUndoReplace}
+        onDelete={handleDelete}
+        onUndoDelete={handleUndoDelete}
+        onInsert={handleInsert}
+        onRemoveInsert={handleRemoveInsert}
+      />
+    )}
+    </>
   );
 }

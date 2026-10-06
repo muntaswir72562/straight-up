@@ -35,6 +35,9 @@ export const AUTO_CROP = true;
 /** Width in pixels for page thumbnails in Replace Pages mode */
 export const THUMBNAIL_WIDTH = 180;
 
+/** Width in pixels for fullscreen viewer page renders */
+export const FULLSCREEN_RENDER_WIDTH = 900;
+
 /* --- Page Cleaning constants --- */
 export const CLEAN_BLUR_SIZE = 3;
 export const CLEAN_BG_KERNEL_SIZE = 51;
