@@ -115,7 +115,7 @@ JPEG_QUALITY = 92
 
 def _fix_worker(args):
     """
-    Worker: render one page, dewarp, clean, return JPEG bytes.
+    Worker: render one page, straighten, dewarp, clean, return JPEG bytes.
     Returns (page_num_1based, jpeg_bytes_or_None, (rect_w, rect_h))
     """
     (input_path, page_idx, total, cancel_path) = args
@@ -127,6 +127,9 @@ def _fix_worker(args):
     try:
         import fitz as _fitz
         from clean_pdf import dewarp_page, clean_page
+        from straighten_pdf import (detect_skew_from_text, straighten_page,
+                                    MIN_SKEW_ANGLE, MIN_SKEW_CONFIDENCE,
+                                    DETECT_WIDTH)
 
         doc = _fitz.open(input_path)
         page = doc[page_idx]
@@ -148,10 +151,27 @@ def _fix_worker(args):
             gray = img.copy()
         del img
 
+        # Straighten (deskew) — detect at reduced resolution, rotate at full
+        fh, fw = gray.shape
+        det_scale = DETECT_WIDTH / fw
+        det_h = int(fh * det_scale)
+        small = cv2.resize(gray, (DETECT_WIDTH, det_h),
+                           interpolation=cv2.INTER_AREA)
+        angle, confidence = detect_skew_from_text(small)
+        del small
+
+        was_straightened = False
+        if confidence >= MIN_SKEW_CONFIDENCE and abs(angle) >= MIN_SKEW_ANGLE:
+            gray = straighten_page(gray, angle)
+            was_straightened = True
+            print(f"[replace-fix] Page {pnum}/{total}: "
+                  f"straightened by {angle:.2f}\u00b0", file=sys.stderr)
+
         # Dewarp
         dewarped, was_dewarped = dewarp_page(gray)
         del gray
-        print(f"[replace-fix] Page {pnum}/{total}: dewarped={was_dewarped}",
+        print(f"[replace-fix] Page {pnum}/{total}: "
+              f"straightened={was_straightened} dewarped={was_dewarped}",
               file=sys.stderr)
 
         # Clean
