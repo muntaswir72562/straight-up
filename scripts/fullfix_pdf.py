@@ -170,10 +170,19 @@ def _fix_worker(args):
         del pix
         doc.close()
 
-        # Detect color pages (covers, illustrations)
-        is_color = False
-        if (do_clean or do_dewarp or do_v2) and n_channels >= 3:
-            is_color = is_color_page(img[:, :, :3])
+        # Auto color-page detection disabled — user controls which pages
+        # to skip via the skip_clean_list (UI: "Leave as-is" pages).
+        # is_color = False
+        # if (do_clean or do_dewarp or do_v2) and n_channels >= 3:
+        #     is_color = is_color_page(img[:, :, :3])
+
+        # Pages in the skip list are left completely unmodified (replaces
+        # the old is_color_page auto-detection).
+        if skip_clean_list and pnum in skip_clean_list:
+            del img
+            print(f"[fullfix] Page {pnum}/{total}: skipped (user excluded)",
+                  file=sys.stderr)
+            return (page_idx, None, (rect_w, rect_h))
 
         if n_channels == 4:
             gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
@@ -188,7 +197,7 @@ def _fix_worker(args):
 
         # --- V2 Pipeline (replaces straighten + dewarp when enabled) ---
         skip_v2 = skip_straighten_list and pnum in skip_straighten_list
-        if do_v2 and not is_color and not skip_v2:
+        if do_v2 and not skip_v2:
             from scanner.scan_page import process_page_v2
             result = process_page_v2(result, pnum, total)
             modified = True
@@ -196,7 +205,7 @@ def _fix_worker(args):
             print(f"[fullfix] Page {pnum}/{total}: skipped v2 (user excluded)",
                   file=sys.stderr)
 
-        if not do_v2 or is_color or skip_v2:
+        if not do_v2 or skip_v2:
             # --- Step 1: Straighten (legacy) ---
             skip_str = skip_straighten_list and pnum in skip_straighten_list
             if do_straighten and not skip_str:
@@ -225,7 +234,7 @@ def _fix_worker(args):
 
             # --- Step 2: Dewarp (legacy) ---
             skip_dw = skip_dewarp_list and pnum in skip_dewarp_list
-            if do_dewarp and not is_color and not skip_dw:
+            if do_dewarp and not skip_dw:
                 from clean_pdf import dewarp_page
                 dewarped, was_dewarped = dewarp_page(result)
                 del result
@@ -234,7 +243,7 @@ def _fix_worker(args):
                     modified = True
                 print(f"[fullfix] Page {pnum}/{total}: dewarped={was_dewarped}",
                       file=sys.stderr)
-            elif do_dewarp and not is_color and skip_dw:
+            elif do_dewarp and skip_dw:
                 print(f"[fullfix] Page {pnum}/{total}: skipped dewarp (user excluded)",
                       file=sys.stderr)
 
@@ -244,21 +253,13 @@ def _fix_worker(args):
             np.save(gray_path, result)
 
         # --- Step 3: Clean ---
-        page_skip = skip_clean_list and pnum in skip_clean_list
-        if do_clean and not is_color and not page_skip:
+        if do_clean:
             from clean_pdf import clean_page
             cleaned = clean_page(result)
             del result
             result = cleaned
             modified = True
             print(f"[fullfix] Page {pnum}/{total}: cleaned", file=sys.stderr)
-
-        if page_skip:
-            print(f"[fullfix] Page {pnum}/{total}: skipped clean (user excluded)",
-                  file=sys.stderr)
-        if is_color and (do_clean or do_dewarp or do_v2):
-            print(f"[fullfix] Page {pnum}/{total}: color page, "
-                  f"skipping clean/dewarp/v2", file=sys.stderr)
 
         if modified:
             _, jpeg_buf = cv2.imencode('.jpg', result,
@@ -317,10 +318,10 @@ def _ocr_worker(args):
             n_ch = pix.n
             del pix
 
-            # Detect color pages — skip OCR preprocessing on these
-            is_color = False
-            if n_ch >= 3:
-                is_color = is_color_page(img[:, :, :3])
+            # Auto color-page detection disabled — skip list handles this
+            # is_color = False
+            # if n_ch >= 3:
+            #     is_color = is_color_page(img[:, :, :3])
 
             if n_ch == 4:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
@@ -332,10 +333,10 @@ def _ocr_worker(args):
             doc.close()
 
             # Apply v2 or legacy straighten for better OCR accuracy
-            if do_v2 and not is_color:
+            if do_v2:
                 from scanner.scan_page import process_page_v2
                 gray = process_page_v2(gray, pnum, total)
-            elif do_straighten and not is_color:
+            elif do_straighten:
                 from straighten_pdf import detect_skew_from_text, straighten_page
                 from straighten_pdf import DETECT_WIDTH, MIN_SKEW_ANGLE, MIN_SKEW_CONFIDENCE
                 h, w = gray.shape

@@ -38,7 +38,8 @@ except ImportError:
     print("Error: scipy required. Install: pip install scipy", file=sys.stderr)
     sys.exit(1)
 
-from fullfix_pdf import is_color_page
+# Auto color-page detection disabled — user controls skip via UI.
+# from fullfix_pdf import is_color_page
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -347,26 +348,27 @@ def process_pdf(input_path, output_path, progress_file, book_name='cleaned'):
             rect = page.rect
             del pix
 
-            # Detect color pages (covers, illustrations) and skip them
-            is_color = False
-            if n_channels >= 3:
-                is_color = is_color_page(img[:, :, :3])
-
-            if is_color:
-                print(f"[clean-pdf] Page {pnum}/{total}: color page, copying as-is",
-                      file=sys.stderr)
-                del img
-                batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
-                pages_in_batch += 1
-                if pages_in_batch >= BATCH_SIZE and pnum < total:
-                    batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
-                    batch_doc.save(batch_path, deflate=True)
-                    batch_doc.close()
-                    batch_files.append(batch_path)
-                    batch_doc = fitz.open()
-                    pages_in_batch = 0
-                    gc.collect()
-                continue
+            # Auto color-page detection disabled — all pages are processed.
+            # User controls which pages to skip via the fullfix UI skip list.
+            # is_color = False
+            # if n_channels >= 3:
+            #     is_color = is_color_page(img[:, :, :3])
+            #
+            # if is_color:
+            #     print(f"[clean-pdf] Page {pnum}/{total}: color page, copying as-is",
+            #           file=sys.stderr)
+            #     del img
+            #     batch_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+            #     pages_in_batch += 1
+            #     if pages_in_batch >= BATCH_SIZE and pnum < total:
+            #         batch_path = os.path.join(tmp_dir, f'_batch_{len(batch_files)}.pdf')
+            #         batch_doc.save(batch_path, deflate=True)
+            #         batch_doc.close()
+            #         batch_files.append(batch_path)
+            #         batch_doc = fitz.open()
+            #         pages_in_batch = 0
+            #         gc.collect()
+            #     continue
 
             if n_channels == 4:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)

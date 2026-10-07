@@ -1174,7 +1174,7 @@ export function BookScanTool() {
                   style={{ opacity: locked ? 0.5 : 1 }}
                 >
                   <span className="text-xs" style={{ color: 'var(--color-ink-muted)' }}>
-                    Skip clean on pages (comma-separated)
+                    Skip pages — leave as-is (comma-separated)
                   </span>
                   <input
                     type="text"
