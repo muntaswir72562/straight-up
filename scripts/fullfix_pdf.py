@@ -71,7 +71,17 @@ def is_color_page(rgb: np.ndarray) -> bool:
         return True
     wb = small.astype(np.float32) * (paper.mean() / np.maximum(paper, 1))
     s = cv2.cvtColor(np.clip(wb, 0, 255).astype(np.uint8), cv2.COLOR_RGB2HSV)[:, :, 1]
-    return bool(s.mean() > 20 or (s > 60).mean() > 0.03)
+    if not (s.mean() > 20 or (s > 60).mean() > 0.03):
+        return False
+    # 3. Saturation is a ratio, so dark text letters on a tinted photo come out
+    #    "saturated" even though they are barely coloured (a strongly blue-lit
+    #    page: 5 % of pixels over 60). Real colour is also clearly coloured in
+    #    absolute terms: confirm with chroma (max - min channel) after white
+    #    balance. Covers measured 18-39 mean / 15-49 % over 40; text pages,
+    #    tinted ones included, at most 12 mean / 3.5 %.
+    wbc = np.clip(wb, 0, 255)
+    ch = wbc.max(axis=2) - wbc.min(axis=2)
+    return bool(ch.mean() > 15 or (ch > 40).mean() > 0.08)
 
 
 def _num_workers():
