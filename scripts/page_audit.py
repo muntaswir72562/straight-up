@@ -50,11 +50,12 @@ CONTEXT_PAGES = 3            # pages on each side to confirm a finding
 MAX_PAGE_VALUE = 3000        # reject page numbers above this
 
 # Blur detection
-BLUR_DPI = 100               # render DPI for blur analysis
+BLUR_DPI = 150               # render DPI for blur analysis
 BLUR_GRID_ROWS = 5           # vertical blocks
 BLUR_GRID_COLS = 4           # horizontal blocks
-BLUR_SHARP_THRESHOLD = 80    # Laplacian variance below this is blurry
-BLUR_RATIO_THRESHOLD = 0.35  # block score / page-max ratio below this = blurry
+BLUR_MIN_DARK = 0.01         # a block needs >= 1 % dark (< 128) pixels to be judged
+BLUR_MIN_BLOCKS = 6          # need at least this many text blocks on the page
+BLUR_RATIO_THRESHOLD = 0.85  # block edge sharpness / page's 75th percentile below this = blurry (sharp pages: >= 0.87; sigma 1.5 blur: 0.83)
 BLUR_MIN_BLURRY_BLOCKS = 2   # need at least this many blurry blocks to flag
 
 # Roman numeral helpers
@@ -156,6 +157,9 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
             continue
 
         band = 'top' if cy <= top_cutoff else 'bottom'
+        # how close to the page edge (0 = at the edge): page numbers sit on
+        # the outermost line, footnote numbers and years above it
+        edge = (cy if band == 'top' else page_height - cy) / max(page_height, 1)
 
         # Horizontal slot
         if cx < page_width * 0.33:
@@ -199,6 +203,7 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
                     'conf': conf,
                     'text': raw,
                     'weight': 1.0,
+                    'edge': edge,
                 })
 
         # Try roman
@@ -217,6 +222,7 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
                 'conf': conf,
                 'text': raw,
                 'weight': weight,
+                'edge': edge,
             })
 
     return candidates
@@ -230,7 +236,8 @@ def _score_slot(candidates_per_page: list[list[dict]], slot: str, kind: str,
     Score a slot by counting consistent consecutive pairs.
     parity is 'odd' or 'even' (1-based scan page index).
     """
-    # Collect (scan_index, value) for pages of this parity in this slot+kind
+    # values of this slot+kind on each page of this parity (a slot can hold
+    # several numbers: page number plus footnote numbers or years)
     points = []
     for scan_idx, cands in enumerate(candidates_per_page):
         scan_page = scan_idx + 1  # 1-based
@@ -238,19 +245,17 @@ def _score_slot(candidates_per_page: list[list[dict]], slot: str, kind: str,
             continue
         if parity == 'even' and scan_page % 2 == 1:
             continue
-        for c in cands:
-            if c['slot'] == slot and c['kind'] == kind:
-                points.append((scan_idx, c['value']))
-                break  # one per page per slot
+        vals = {c['value'] for c in cands if c['slot'] == slot and c['kind'] == kind}
+        if vals:
+            points.append((scan_idx, vals))
 
-    # Count consistent pairs (same parity = step 2 in scan, step 2 in value)
+    # a consecutive pair is consistent if some value moved by the scan step
     score = 0
     for i in range(len(points) - 1):
         si, vi = points[i]
         sj, vj = points[i + 1]
-        scan_step = sj - si
-        val_step = vj - vi
-        if scan_step == val_step:
+        step = sj - si
+        if any((v + step) in vj for v in vi):
             score += 1
     return score
 
@@ -291,37 +296,58 @@ def learn_layout(candidates_per_page: list[list[dict]]) -> dict:
 
 def pick_page_numbers(candidates_per_page: list[list[dict]], layout: dict) -> list[dict | None]:
     """
-    For each scan page, pick the best page number candidate.
-    Returns a list of candidate dicts (or None if no number found).
+    For each scan page, pick the page-number candidate.
+
+    1. Candidates of the learned slot+kind for this page's parity (all
+       candidates when no layout was learned or the slot is empty).
+    2. First guess: the one closest to the page edge (page numbers sit on the
+       outermost line; footnote numbers and years sit above them).
+    3. Then, for every page, prefer the candidate whose value fits the local
+       numbering (value - scan index == the most common offset of the first
+       guesses around it). A footnote number or a year in the same corner is
+       thereby replaced by the real page number when the page has one.
     """
-    result = []
+    pools = []
     for scan_idx, cands in enumerate(candidates_per_page):
         scan_page = scan_idx + 1
         parity = 'odd' if scan_page % 2 == 1 else 'even'
         winning = layout.get(parity)
-
-        if not cands:
-            result.append(None)
-            continue
-
+        pool = cands
         if winning is not None and not layout.get('fallback'):
             slot, kind = winning
-            # Filter to winning slot+kind
             matching = [c for c in cands if c['slot'] == slot and c['kind'] == kind]
             if matching:
-                # Pick highest weight, then highest conf
-                matching.sort(key=lambda c: (c['weight'], c['conf']), reverse=True)
-                result.append(matching[0])
-                continue
+                pool = matching
+        pools.append(pool)
 
-        # Fallback: pick any candidate, preferring higher weight/conf
-        if layout.get('fallback') or True:
-            # Try all candidates
-            sorted_cands = sorted(cands, key=lambda c: (c['weight'], c['conf']), reverse=True)
-            result.append(sorted_cands[0])
-        else:
+    def first_guess(pool):
+        if not pool:
+            return None
+        return sorted(pool, key=lambda c: (-c['weight'], c.get('edge', 0.0), -c['conf']))[0]
+
+    guess = [first_guess(p) for p in pools]
+    offs = [(g['value'] - i) if g is not None else None for i, g in enumerate(guess)]
+
+    result = []
+    for i, pool in enumerate(pools):
+        if not pool:
             result.append(None)
-
+            continue
+        kind_i = guess[i]['kind']
+        near = [offs[j] for j in range(max(0, i - SLIDING_WINDOW), min(len(pools), i + SLIDING_WINDOW + 1))
+                if j != i and offs[j] is not None and guess[j]['kind'] == kind_i]
+        pick = guess[i]
+        if len(near) >= MIN_VOTES:
+            counts = Counter(near).most_common()
+            # try the most common offsets first (a gap or a duplicate makes two)
+            for o, n in counts[:2]:
+                if n < 2:
+                    break
+                fit = [c for c in pool if c['kind'] == kind_i and c['value'] - i == o]
+                if fit:
+                    pick = sorted(fit, key=lambda c: (c.get('edge', 0.0), -c['conf']))[0]
+                    break
+        result.append(pick)
     return result
 
 
@@ -445,6 +471,25 @@ def analyse_run(run: dict) -> tuple[list[dict], list[int | None]]:
 
 # ── Step D: findings ─────────────────────────────────────────────────
 
+def _in_sequence(run_pages: list[dict], a: int, b: int, need: int = 2) -> bool:
+    """True if the numbering around a pair of pages is established: at least
+    `need` read pages among the 4 before `a` continue a's number (value goes
+    down by 1 per page) and at least `need` among the 4 after `b` continue
+    b's number. On front matter (contents pages full of right-aligned page
+    references, a cover, a dedication) the same number read on two pages is
+    noise, not a duplicate."""
+    va, vb = run_pages[a]['value'], run_pages[b]['value']
+    before = sum(1 for k in range(max(0, a - 4), a)
+                 if run_pages[k]['source'] == 'read' and run_pages[k]['value'] == va - (a - k))
+    # after the pair the numbering must run on consistently too, but it may
+    # skip (a duplicate next to a missing page: 20, 20, 22, 23 ...)
+    offs = [run_pages[k]['value'] - k for k in range(b + 1, min(len(run_pages), b + 5))
+            if run_pages[k]['source'] == 'read' and run_pages[k]['value'] is not None
+            and run_pages[k]['value'] > vb]
+    after = Counter(offs).most_common(1)[0][1] if offs else 0
+    return before >= need and after >= need
+
+
 def detect_issues(run_pages: list[dict], smoothed: list[int | None],
                   run_kind: str, run_from: int) -> list[dict]:
     """
@@ -526,7 +571,8 @@ def detect_issues(run_pages: list[dict], smoothed: list[int | None],
         b = run_pages[i + 1]
         if (a['value'] is not None and b['value'] is not None
                 and a['value'] == b['value']
-                and a['source'] == 'read' and b['source'] == 'read'):
+                and a['source'] == 'read' and b['source'] == 'read'
+                and _in_sequence(run_pages, i, i + 1)):
             val_str = int_to_roman(a['value']) if run_kind == 'roman' else str(a['value'])
             issues.append({
                 'type': 'duplicate',
@@ -711,10 +757,24 @@ _GRID_LABELS_ROW = ['top', 'upper', 'middle', 'lower', 'bottom']
 _GRID_LABELS_COL = ['left', 'center-left', 'center-right', 'right']
 
 
-def _laplacian_variance(gray_block: np.ndarray) -> float:
-    """Sharpness score via Laplacian variance — higher = sharper."""
-    lap = cv2.Laplacian(gray_block, cv2.CV_64F)
-    return float(lap.var())
+def _edge_sharpness(gray_block: np.ndarray) -> float | None:
+    """Sharpness of the letter edges in a block, independent of how much
+    text it holds: at strong edges (local contrast > 80), the gradient
+    divided by that contrast. A sharp edge goes from paper to ink in about
+    one pixel (high ratio), a blurred one over several (low ratio).
+    Laplacian variance was tried first: it mostly measures how much text a
+    block holds, and flagged half the pages of a sharp book.
+    Returns None if the block has too few edges to judge."""
+    f = gray_block.astype(np.float32)
+    gx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.hypot(gx, gy) / 8.0
+    k = np.ones((5, 5), np.uint8)
+    contrast = cv2.dilate(gray_block, k).astype(np.float32) - cv2.erode(gray_block, k).astype(np.float32)
+    m = contrast > 80
+    if np.count_nonzero(m) < 200:
+        return None
+    return float(np.percentile(grad[m] / contrast[m], 90))
 
 
 def detect_blur_page(gray: np.ndarray) -> dict | None:
@@ -746,27 +806,31 @@ def detect_blur_page(gray: np.ndarray) -> dict | None:
             x1 = (c + 1) * bw if c < BLUR_GRID_COLS - 1 else w
             block = gray[y0:y1, x0:x1]
 
-            # Skip blocks with very little ink (margins, blank areas)
-            ink = np.sum(block < 200)
-            if (ink / block.size) < 0.005:
+            # Only blocks with real print in them: dark ink (< 128), not
+            # just faint show-through, stamps or the grey of a cover
+            dark = np.count_nonzero(block < 128) / block.size
+            if dark < BLUR_MIN_DARK:
                 continue
 
             label = f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"
-            scores[label] = _laplacian_variance(block)
+            sh = _edge_sharpness(block)
+            if sh is not None:
+                scores[label] = sh
 
-    if len(scores) < 3:
-        # Not enough inked blocks to judge
+    if len(scores) < BLUR_MIN_BLOCKS:
+        # Not enough text blocks to judge (cover, title page, short page)
         return None
 
+    # Compare with the page's own sharp text, so print quality and
+    # cleaning don't matter: only a block clearly softer than the sharp
+    # part of the same page counts.
+    ref = float(np.percentile(list(scores.values()), 75))
     max_score = max(scores.values())
-    if max_score < BLUR_SHARP_THRESHOLD:
-        # Entire page is low-contrast or uniformly soft — not partial blur
+    if ref <= 0:
         return None
 
-    blurry = []
-    for label, score in scores.items():
-        if score < BLUR_SHARP_THRESHOLD and (score / max_score) < BLUR_RATIO_THRESHOLD:
-            blurry.append(label)
+    blurry = [label for label, score in scores.items()
+              if score / ref < BLUR_RATIO_THRESHOLD]
 
     if len(blurry) < BLUR_MIN_BLURRY_BLOCKS:
         return None
@@ -804,12 +868,21 @@ def detect_blur_all(pdf_path: str, total: int,
         if result:
             regions = result['blurry_regions']
             # Simplify region labels for readability
-            simple = []
-            for r in regions:
-                row_part = r.split('-')[0]
-                if row_part not in simple:
-                    simple.append(row_part)
-            region_str = ', '.join(simple)
+            rows = [r.split('-')[0] for r in regions]
+            cols = [r.split('-', 1)[1] for r in regions]
+            row_set = list(dict.fromkeys(rows))
+            col_set = set(cols)
+            # a soft side (page curving away, edge of the depth of field)
+            # reads better as "right side" than as a list of rows
+            n_cols = len(_GRID_LABELS_COL)
+            left_cols = set(_GRID_LABELS_COL[:n_cols // 2])
+            right_cols = set(_GRID_LABELS_COL[n_cols // 2:])
+            if len(row_set) >= 3 and col_set <= right_cols:
+                region_str = 'right side'
+            elif len(row_set) >= 3 and col_set <= left_cols:
+                region_str = 'left side'
+            else:
+                region_str = ', '.join(row_set)
 
             issues.append({
                 'type': 'info',
@@ -834,7 +907,7 @@ def is_blank_page(thumb: np.ndarray) -> bool:
         return False
     # Ink = pixels darker than 200 (on 0-255 scale)
     ink_pixels = np.sum(thumb < 200)
-    return (ink_pixels / thumb.size) < MIN_INK_FRACTION
+    return bool((ink_pixels / thumb.size) < MIN_INK_FRACTION)
 
 
 # ── OCR for non-OCR path ────────────────────────────────────────────
@@ -1012,6 +1085,7 @@ def audit_book(output_pdf: str, tmp_dir: str,
 
     for run in runs:
         run_pages, smoothed = analyse_run(run)
+        run['smoothed'] = smoothed
         run_issues = detect_issues(run_pages, smoothed, run['kind'], run['from_scan'])
         all_pages.extend(run_pages)
         all_issues.extend(run_issues)
@@ -1025,6 +1099,7 @@ def audit_book(output_pdf: str, tmp_dir: str,
 
     # ── Step E: content checks for duplicates ─────────────────────
     all_issues = check_duplicates(all_issues, all_pages, page_texts, thumbnails)
+    all_issues = _merge_duplicates(all_issues)
 
     # ── Step F: blur detection ─────────────────────────────────────
     try:
@@ -1040,7 +1115,12 @@ def audit_book(output_pdf: str, tmp_dir: str,
     for run in runs:
         # Find the range of printed numbers in this run
         run_pages_slice = all_pages[run['from_scan'] - 1:run['to_scan']]
-        values = [p['value'] for p in run_pages_slice if p.get('value') is not None]
+        # only numbers that fit the run's sequence (a misread year or footnote
+        # number must not stretch the range)
+        sm = run.get('smoothed') or []
+        values = [p['value'] for j, p in enumerate(run_pages_slice)
+                  if p.get('value') is not None and j < len(sm) and sm[j] is not None
+                  and p['value'] - j == sm[j]]
         if values:
             lo, hi = min(values), max(values)
             if run['kind'] == 'roman':
@@ -1078,7 +1158,8 @@ def audit_book(output_pdf: str, tmp_dir: str,
 
     # Build summary
     if not all_issues:
-        range_parts = [r['printed'] for r in run_summaries if r['printed'] != '?']
+        range_parts = [r['printed'] for r in run_summaries
+                       if r['printed'] != '?' and r['to_scan'] - r['from_scan'] >= 3]
         if range_parts:
             summary = f"Page numbers continuous: {', '.join(range_parts)}"
         else:
@@ -1108,11 +1189,40 @@ def audit_book(output_pdf: str, tmp_dir: str,
     return report
 
 
+def _merge_duplicates(issues: list[dict]) -> list[dict]:
+    """One duplicate is often found twice: by the numbering dropping back and
+    by the same number on two pages. Keep one entry per place (the one that
+    names the page number), with the higher confidence of the two."""
+    rank = {'low': 0, 'high': 1}
+    dups = [i for i in issues if i['type'] == 'duplicate']
+    keep = []
+    for d in sorted(dups, key=lambda i: (not i.get('printed'), i['after_scan'])):
+        same = [k for k in keep if abs(k['after_scan'] - d['after_scan']) <= 1]
+        if same:
+            k = same[0]
+            if rank.get(d.get('confidence'), 0) > rank.get(k.get('confidence'), 0):
+                k['confidence'] = d['confidence']
+            continue
+        keep.append(d)
+    others = [i for i in issues if i['type'] != 'duplicate']
+    return sorted(others + keep, key=lambda i: i.get('after_scan', 0))
+
+
+def _json_default(o):
+    """numpy scalars/arrays -> plain Python, so a stray numpy value can never
+    make the report fail to save."""
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f'Object of type {o.__class__.__name__} is not JSON serializable')
+
+
 def _write_report(report: dict, tmp_dir: str) -> None:
     """Write page_audit.json to the temp directory."""
     out_path = os.path.join(tmp_dir, 'page_audit.json')
     with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+        json.dump(report, f, ensure_ascii=False, indent=2, default=_json_default)
     print(f"[audit] Report written to {out_path}", file=sys.stderr)
 
 
