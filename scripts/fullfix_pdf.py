@@ -706,6 +706,8 @@ if __name__ == '__main__':
             if tok.isdigit():
                 skip_dewarp.add(int(tok))
 
+    do_audit = sys.argv[13] == '1' if len(sys.argv) > 13 else True
+
     has_processing = straighten or clean or dewarp or v2
 
     if not has_processing and not ocr:
@@ -753,16 +755,17 @@ if __name__ == '__main__':
                                     os.path.join(tmp_dir, 'ocr_text.txt'))
 
         # ── Page audit ─────────────────────────────────────────────
-        try:
-            write_progress(prog, 'checking', 0, 0)
-            from page_audit import audit_book
-            ocr_json = os.path.join(tmp_dir, 'ocr_results.json')
-            rep = audit_book(out, tmp_dir,
-                             ocr_json if ocr and os.path.isfile(ocr_json) else None)
-            print(f"[audit] {rep['summary']}; {len(rep['issues'])} issue(s)",
-                  file=sys.stderr)
-        except Exception as e:
-            print(f"[audit] failed: {e}", file=sys.stderr)
+        if do_audit:
+            try:
+                write_progress(prog, 'checking', 0, 0)
+                from page_audit import audit_book
+                ocr_json = os.path.join(tmp_dir, 'ocr_results.json')
+                rep = audit_book(out, tmp_dir,
+                                 ocr_json if ocr and os.path.isfile(ocr_json) else None)
+                print(f"[audit] {rep['summary']}; {len(rep['issues'])} issue(s)",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"[audit] failed: {e}", file=sys.stderr)
 
         write_progress(prog, 'done', 0, 0)
     except SystemExit:

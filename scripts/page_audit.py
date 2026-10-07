@@ -49,6 +49,14 @@ MIN_CONSISTENT_PAIRS = 5     # minimum for a slot to be accepted
 CONTEXT_PAGES = 3            # pages on each side to confirm a finding
 MAX_PAGE_VALUE = 3000        # reject page numbers above this
 
+# Blur detection
+BLUR_DPI = 100               # render DPI for blur analysis
+BLUR_GRID_ROWS = 5           # vertical blocks
+BLUR_GRID_COLS = 4           # horizontal blocks
+BLUR_SHARP_THRESHOLD = 80    # Laplacian variance below this is blurry
+BLUR_RATIO_THRESHOLD = 0.35  # block score / page-max ratio below this = blurry
+BLUR_MIN_BLURRY_BLOCKS = 2   # need at least this many blurry blocks to flag
+
 # Roman numeral helpers
 _ROMAN_VALUES = {'i': 1, 'v': 5, 'x': 10, 'l': 50, 'c': 100, 'd': 500, 'm': 1000}
 _ROMAN_PAIRS = [
@@ -697,6 +705,127 @@ def check_duplicates(issues: list[dict], all_pages: list[dict],
     return refined
 
 
+# ── Blur detection ───────────────────────────────────────────────────
+
+_GRID_LABELS_ROW = ['top', 'upper', 'middle', 'lower', 'bottom']
+_GRID_LABELS_COL = ['left', 'center-left', 'center-right', 'right']
+
+
+def _laplacian_variance(gray_block: np.ndarray) -> float:
+    """Sharpness score via Laplacian variance — higher = sharper."""
+    lap = cv2.Laplacian(gray_block, cv2.CV_64F)
+    return float(lap.var())
+
+
+def detect_blur_page(gray: np.ndarray) -> dict | None:
+    """
+    Detect partially blurry regions in a page image.
+
+    Divides the page into a BLUR_GRID_ROWS x BLUR_GRID_COLS grid, computes
+    Laplacian variance per block, and flags blocks that are significantly
+    less sharp than the page's sharpest regions.
+
+    Returns None if the page is fine, or a dict with:
+        blurry_regions: list of region label strings
+        scores: dict mapping region label -> variance score
+        max_score: the highest block score on the page
+    """
+    h, w = gray.shape[:2]
+    if h < 50 or w < 50:
+        return None
+
+    bh = h // BLUR_GRID_ROWS
+    bw = w // BLUR_GRID_COLS
+
+    scores: dict[str, float] = {}
+    for r in range(BLUR_GRID_ROWS):
+        for c in range(BLUR_GRID_COLS):
+            y0 = r * bh
+            y1 = (r + 1) * bh if r < BLUR_GRID_ROWS - 1 else h
+            x0 = c * bw
+            x1 = (c + 1) * bw if c < BLUR_GRID_COLS - 1 else w
+            block = gray[y0:y1, x0:x1]
+
+            # Skip blocks with very little ink (margins, blank areas)
+            ink = np.sum(block < 200)
+            if (ink / block.size) < 0.005:
+                continue
+
+            label = f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"
+            scores[label] = _laplacian_variance(block)
+
+    if len(scores) < 3:
+        # Not enough inked blocks to judge
+        return None
+
+    max_score = max(scores.values())
+    if max_score < BLUR_SHARP_THRESHOLD:
+        # Entire page is low-contrast or uniformly soft — not partial blur
+        return None
+
+    blurry = []
+    for label, score in scores.items():
+        if score < BLUR_SHARP_THRESHOLD and (score / max_score) < BLUR_RATIO_THRESHOLD:
+            blurry.append(label)
+
+    if len(blurry) < BLUR_MIN_BLURRY_BLOCKS:
+        return None
+
+    return {
+        'blurry_regions': blurry,
+        'scores': {k: round(v, 1) for k, v in scores.items()},
+        'max_score': round(max_score, 1),
+    }
+
+
+def detect_blur_all(pdf_path: str, total: int,
+                    blanks: list[bool]) -> list[dict]:
+    """
+    Run blur detection on all pages of a PDF.
+
+    Returns a list of audit issues for pages with partial blur.
+    """
+    issues: list[dict] = []
+    doc = fitz.open(pdf_path)
+
+    for i in range(total):
+        if i < len(blanks) and blanks[i]:
+            continue
+
+        page = doc[i]
+        pix = page.get_pixmap(dpi=BLUR_DPI, colorspace=fitz.csGRAY)
+        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.h, pix.w).copy()
+        del pix
+
+        result = detect_blur_page(gray)
+        del gray
+
+        if result:
+            regions = result['blurry_regions']
+            # Simplify region labels for readability
+            simple = []
+            for r in regions:
+                row_part = r.split('-')[0]
+                if row_part not in simple:
+                    simple.append(row_part)
+            region_str = ', '.join(simple)
+
+            issues.append({
+                'type': 'info',
+                'confidence': 'high',
+                'printed': [],
+                'after_scan': i + 1,
+                'before_scan': i + 1,
+                'message': f"Page {i + 1}: partial blur detected ({region_str})",
+            })
+
+    doc.close()
+    print(f"[audit] Blur check: {len(issues)} page(s) with partial blur",
+          file=sys.stderr)
+    return issues
+
+
 # ── Blank detection ──────────────────────────────────────────────────
 
 def is_blank_page(thumb: np.ndarray) -> bool:
@@ -897,6 +1026,14 @@ def audit_book(output_pdf: str, tmp_dir: str,
     # ── Step E: content checks for duplicates ─────────────────────
     all_issues = check_duplicates(all_issues, all_pages, page_texts, thumbnails)
 
+    # ── Step F: blur detection ─────────────────────────────────────
+    try:
+        blanks = [p.get('blank', False) for p in all_pages]
+        blur_issues = detect_blur_all(output_pdf, total, blanks)
+        all_issues.extend(blur_issues)
+    except Exception as e:
+        print(f"[audit] Blur detection failed: {e}", file=sys.stderr)
+
     # ── Build output ──────────────────────────────────────────────
     # Format runs for output
     run_summaries = []
@@ -949,11 +1086,15 @@ def audit_book(output_pdf: str, tmp_dir: str,
     else:
         n_missing = sum(1 for i in all_issues if i['type'] == 'missing')
         n_dup = sum(1 for i in all_issues if i['type'] == 'duplicate')
+        n_blur = sum(1 for i in all_issues
+                     if i['type'] == 'info' and 'blur' in i.get('message', ''))
         parts = []
         if n_missing:
             parts.append(f"{n_missing} missing")
         if n_dup:
             parts.append(f"{n_dup} duplicate")
+        if n_blur:
+            parts.append(f"{n_blur} partially blurry")
         summary = f"Issues found: {', '.join(parts)}"
 
     report = {

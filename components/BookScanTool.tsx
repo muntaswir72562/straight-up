@@ -65,6 +65,7 @@ export function BookScanTool() {
   const [fullfixSkipStraighten, setFullfixSkipStraighten] = useState('');
   const [fullfixSkipDewarp, setFullfixSkipDewarp] = useState('');
   const [fullfixOcr, setFullfixOcr] = useState(false);
+  const [fullfixAudit, setFullfixAudit] = useState(true);
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -560,6 +561,60 @@ export function BookScanTool() {
     };
   }, [replacePdf]);
 
+  // --- Auto-download audit TXT for multi-book when issues found ---
+  const downloadAuditTxt = useCallback(async (auditUrl: string, bookFilename: string) => {
+    try {
+      const res = await fetch(auditUrl);
+      if (!res.ok) return;
+      const data = await res.json() as {
+        summary: string;
+        issues: { type: string; confidence: string; message: string }[];
+        pages: { scan: number; printed: string | null; kind: string; source: string; blank: boolean }[];
+      };
+      if (!data.issues || data.issues.length === 0) return;
+
+      // Build readable TXT
+      const lines: string[] = [];
+      const name = bookFilename.replace(/\.pdf$/i, '');
+      lines.push(`Page Audit Report: ${bookFilename}`);
+      lines.push('='.repeat(40));
+      lines.push('');
+      lines.push(`Summary: ${data.summary}`);
+      lines.push('');
+      lines.push(`Issues (${data.issues.length}):`);
+      for (const issue of data.issues) {
+        const tag = issue.confidence === 'high' ? 'HIGH' : 'LOW';
+        const prefix = issue.type === 'info' ? 'INFO' : tag;
+        lines.push(`  [${prefix}] ${issue.message}`);
+      }
+
+      if (data.pages && data.pages.length > 0) {
+        lines.push('');
+        lines.push('Page mapping:');
+        for (const p of data.pages) {
+          const printed = p.printed ?? '(unnumbered)';
+          const flags: string[] = [];
+          if (p.blank) flags.push('blank');
+          if (p.source === 'infer') flags.push('inferred');
+          const suffix = flags.length > 0 ? `  [${flags.join(', ')}]` : '';
+          lines.push(`  Scan ${String(p.scan).padStart(4)} → ${printed}${suffix}`);
+        }
+      }
+
+      lines.push('');
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain; charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${name}_audit.txt`;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => { document.body.removeChild(link); URL.revokeObjectURL(url); }, 300);
+    } catch {
+      // Non-critical — don't block the pipeline
+    }
+  }, []);
+
   // --- Start processing ---
   const handleStart = useCallback(async () => {
     if (!canStart) return;
@@ -632,12 +687,18 @@ export function BookScanTool() {
           const name = entry.file.name.replace(/\.pdf$/i, '');
           result = await runFullfixPipeline(
             entry.file, name,
-            { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined },
+            { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined, audit: fullfixAudit },
             progressCb, cancelRef.current
           );
           setFixFiles((prev) =>
             prev.map((e) => e.id === entry.id ? { ...e, status: 'done' } : e)
           );
+
+          // Multi-book: auto-download audit TXT if discrepancies found
+          if (fullfixAudit && queue.length > 1 && result?.downloadUrl) {
+            const auditUrl = `${result.downloadUrl}&type=audit`;
+            await downloadAuditTxt(auditUrl, entry.file.name);
+          }
         }
         setFixQueueLabel('');
       }
@@ -662,7 +723,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr]);
+  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -1095,12 +1156,40 @@ export function BookScanTool() {
               borderRadius: 'var(--radius-lg)',
             }}
           >
-            <p
-              className="text-xs font-semibold uppercase tracking-wider"
-              style={{ color: 'var(--color-ink-muted)' }}
-            >
-              Options
-            </p>
+            <div className="flex items-center justify-between">
+              <p
+                className="text-xs font-semibold uppercase tracking-wider"
+                style={{ color: 'var(--color-ink-muted)' }}
+              >
+                Options
+              </p>
+              <label
+                className="flex items-center gap-2 cursor-pointer select-none"
+                style={{ opacity: locked ? 0.5 : 1 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={fullfixV2 && fullfixClean && fullfixOcr && fullfixAudit}
+                  ref={(el) => {
+                    if (el) {
+                      const count = [fullfixV2, fullfixClean, fullfixOcr, fullfixAudit].filter(Boolean).length;
+                      el.indeterminate = count > 0 && count < 4;
+                    }
+                  }}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setFullfixV2(v);
+                    setFullfixClean(v);
+                    setFullfixOcr(v);
+                    setFullfixAudit(v);
+                  }}
+                  disabled={locked}
+                  className="accent-[var(--color-primary)]"
+                  style={{ width: 16, height: 16 }}
+                />
+                <span className="text-xs" style={{ color: 'var(--color-ink-muted)' }}>All</span>
+              </label>
+            </div>
             <label
               className="flex items-center gap-3 cursor-pointer select-none"
               style={{ opacity: locked ? 0.5 : 1 }}
@@ -1214,6 +1303,27 @@ export function BookScanTool() {
                 </span>
                 <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
                   Extract searchable text from scanned pages
+                </span>
+              </div>
+            </label>
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={fullfixAudit}
+                onChange={(e) => setFullfixAudit(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <div className="flex flex-col">
+                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                  Check discrepancies
+                </span>
+                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                  Detect missing or duplicate pages after processing
                 </span>
               </div>
             </label>
@@ -1338,6 +1448,7 @@ export function BookScanTool() {
               downloadUrl={downloadUrl}
               angles={resultAngles}
               ocrEnabled={mode === 'fullfix' && fullfixOcr}
+              auditEnabled={mode === 'fullfix' && fullfixAudit}
               onStartOver={handleStartOver}
             />
           ) : (

@@ -16,7 +16,7 @@ const CHUNK_SIZE = 400 * 1024 * 1024;
 export async function runFullfixPipeline(
   file: File,
   bookName: string,
-  options: { straighten: boolean; clean: boolean; dewarp: boolean; v2: boolean; skipClean?: string; ocr?: boolean; skipStraighten?: string; skipDewarp?: string },
+  options: { straighten: boolean; clean: boolean; dewarp: boolean; v2: boolean; skipClean?: string; ocr?: boolean; skipStraighten?: string; skipDewarp?: string; audit?: boolean },
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
 ): Promise<PipelineResult> {
@@ -40,6 +40,7 @@ export async function runFullfixPipeline(
   if (options.skipDewarp) {
     createForm.append('skipDewarp', options.skipDewarp);
   }
+  createForm.append('audit', options.audit !== false ? '1' : '0');
 
   const createRes = await fetch('/api/fullfix', { method: 'POST', body: createForm });
   if (!createRes.ok) {

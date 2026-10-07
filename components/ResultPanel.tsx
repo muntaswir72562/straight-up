@@ -25,10 +25,11 @@ interface ResultPanelProps {
   downloadUrl: string;
   angles: PageAngleInfo[];
   ocrEnabled?: boolean;
+  auditEnabled?: boolean;
   onStartOver: () => void;
 }
 
-export function ResultPanel({ filename, totalPages, downloadUrl, angles, ocrEnabled, onStartOver }: ResultPanelProps) {
+export function ResultPanel({ filename, totalPages, downloadUrl, angles, ocrEnabled, auditEnabled = true, onStartOver }: ResultPanelProps) {
   const [showAngles, setShowAngles] = useState(false);
   const [audit, setAudit] = useState<AuditReport | null>(null);
 
@@ -40,7 +41,7 @@ export function ResultPanel({ filename, totalPages, downloadUrl, angles, ocrEnab
 
   // Fetch audit report when available
   useEffect(() => {
-    if (!isFullfixApi) return;
+    if (!isFullfixApi || !auditEnabled) return;
     let cancelled = false;
     const url = `${downloadUrl}&type=audit`;
     fetch(url).then((res) => {
@@ -50,7 +51,7 @@ export function ResultPanel({ filename, totalPages, downloadUrl, angles, ocrEnab
       if (data && !cancelled) setAudit(data as AuditReport);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [downloadUrl, isFullfixApi]);
+  }, [downloadUrl, isFullfixApi, auditEnabled]);
 
   const hasIssues = audit && audit.issues.length > 0;
   const noIssues = audit && audit.issues.length === 0;
