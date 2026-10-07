@@ -751,6 +751,18 @@ if __name__ == '__main__':
                 _write_text_sidecar(ocr_json_path,
                                     os.path.join(tmp_dir, 'ocr_text.txt'))
 
+        # ── Page audit ─────────────────────────────────────────────
+        try:
+            write_progress(prog, 'checking', 0, 0)
+            from page_audit import audit_book
+            ocr_json = os.path.join(tmp_dir, 'ocr_results.json')
+            rep = audit_book(out, tmp_dir,
+                             ocr_json if ocr and os.path.isfile(ocr_json) else None)
+            print(f"[audit] {rep['summary']}; {len(rep['issues'])} issue(s)",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[audit] failed: {e}", file=sys.stderr)
+
         write_progress(prog, 'done', 0, 0)
     except SystemExit:
         raise

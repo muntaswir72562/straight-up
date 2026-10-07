@@ -22,7 +22,7 @@ export interface PipelineResult {
   downloadUrl?: string;
 }
 
-export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'merging' | 'saving' | 'ocr';
+export type PipelinePhase = 'preparing' | 'detecting' | 'straightening' | 'cleaning' | 'dewarping' | 'fixing' | 'merging' | 'saving' | 'ocr' | 'checking';
 
 export interface PipelineProgress {
   phase: PipelinePhase;

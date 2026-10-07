@@ -19,10 +19,11 @@ const PHASE_LABELS: Record<PipelinePhase, (current: number, total: number) => st
   merging: (c, t) => `Merging page ${c} of ${t}...`,
   saving: () => 'Saving PDF...',
   ocr: (c, t) => `OCR page ${c} of ${t}...`,
+  checking: () => 'Checking pages\u2026',
 };
 
 export function ProgressPanel({ phase, current, total, onCancel }: ProgressPanelProps) {
-  const isIndeterminate = (phase === 'preparing' && total === 0) || phase === 'saving';
+  const isIndeterminate = (phase === 'preparing' && total === 0) || phase === 'saving' || phase === 'checking';
   const percent = isIndeterminate
     ? 0
     : total > 0

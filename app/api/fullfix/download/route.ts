@@ -33,6 +33,11 @@ export async function GET(req: NextRequest) {
       contentType = 'text/plain; charset=utf-8';
       downloadName = `${bookName}_ocr.txt`;
       break;
+    case 'audit':
+      filePath = join(tempDir, 'page_audit.json');
+      contentType = 'application/json';
+      downloadName = `${bookName}_audit.json`;
+      break;
     default:
       filePath = join(tempDir, 'output.pdf');
       contentType = 'application/pdf';
