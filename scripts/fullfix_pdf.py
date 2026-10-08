@@ -761,7 +761,8 @@ if __name__ == '__main__':
                 from page_audit import audit_book
                 ocr_json = os.path.join(tmp_dir, 'ocr_results.json')
                 rep = audit_book(out, tmp_dir,
-                                 ocr_json if ocr and os.path.isfile(ocr_json) else None)
+                                 ocr_json if ocr and os.path.isfile(ocr_json) else None,
+                                 source_pdf=inp)
                 print(f"[audit] {rep['summary']}; {len(rep['issues'])} issue(s)",
                       file=sys.stderr)
             except Exception as e:

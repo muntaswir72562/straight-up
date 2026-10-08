@@ -50,13 +50,13 @@ CONTEXT_PAGES = 3            # pages on each side to confirm a finding
 MAX_PAGE_VALUE = 3000        # reject page numbers above this
 
 # Blur detection
-BLUR_DPI = 150               # render DPI for blur analysis
+BLUR_DPI = 200               # render DPI for blur analysis (about the photos' own resolution)
 BLUR_GRID_ROWS = 5           # vertical blocks
 BLUR_GRID_COLS = 4           # horizontal blocks
-BLUR_MIN_DARK = 0.01         # a block needs >= 1 % dark (< 128) pixels to be judged
-BLUR_MIN_BLOCKS = 6          # need at least this many text blocks on the page
-BLUR_RATIO_THRESHOLD = 0.85  # block edge sharpness / page's 75th percentile below this = blurry (sharp pages: >= 0.87; sigma 1.5 blur: 0.83)
-BLUR_MIN_BLURRY_BLOCKS = 2   # need at least this many blurry blocks to flag
+BLUR_MIN_LETTERS = 30        # a block is judged only if it holds this many body-text letters
+BLUR_MIN_BLOCKS = 6          # need at least this many judged blocks on the page
+BLUR_RATIO_THRESHOLD = 0.875 # softest block / page's 75th percentile below this = blurry
+BLUR_REGION_RATIO = 0.9      # blocks below this are named in the message
 
 # Roman numeral helpers
 _ROMAN_VALUES = {'i': 1, 'v': 5, 'x': 10, 'l': 50, 'c': 100, 'd': 500, 'm': 1000}
@@ -344,6 +344,22 @@ def pick_page_numbers(candidates_per_page: list[list[dict]], layout: dict) -> li
                 if n < 2:
                     break
                 fit = [c for c in pool if c['kind'] == kind_i and c['value'] - i == o]
+                if not fit and kind_i == 'roman':
+                    # OCR often drops or adds one "I" in small-caps roman
+                    # numerals (XII read as XI, XVIII as XVII). Accept that
+                    # one-letter fix only when it gives exactly the number
+                    # the neighbours expect.
+                    for c in pool:
+                        if c['kind'] != 'roman':
+                            continue
+                        t = _STRIP_CHARS.sub('', c['text']).lower()
+                        for var in (t + 'i', t[:-1] if t.endswith('i') else None):
+                            vv = roman_to_int(var) if var else None
+                            if vv is not None and vv - i == o:
+                                fixed = dict(c)
+                                fixed['value'] = vv
+                                fixed['corrected'] = True
+                                fit.append(fixed)
                 if fit:
                     pick = sorted(fit, key=lambda c: (c.get('edge', 0.0), -c['conf']))[0]
                     break
@@ -370,6 +386,30 @@ def build_runs(picked: list[dict | None]) -> list[dict]:
     Split the book into kind-runs (roman, arabic).
     Each run: {'kind', 'from_scan' (1-based), 'to_scan', 'pages': [picked entries]}.
     """
+    # A page or two read as the other kind inside a run ("1051" read as "v",
+    # a roman section mark in the header) is a misread, not a new run:
+    # treat it as unreadable so the run's number is inferred for it.
+    picked = list(picked)
+    kinds = [p['kind'] if p else None for p in picked]
+    i = 0
+    while i < len(picked):
+        if kinds[i] is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(picked) and kinds[j + 1] in (kinds[i], None):
+            j += 1
+        # [i, j] is a stretch of one kind (gaps allowed); is it a short blip
+        # between two stretches of the other kind?
+        n_read = sum(1 for k in range(i, j + 1) if kinds[k] is not None)
+        before = next((kinds[k] for k in range(i - 1, -1, -1) if kinds[k] is not None), None)
+        after = next((kinds[k] for k in range(j + 1, len(picked)) if kinds[k] is not None), None)
+        if n_read <= 2 and before is not None and before == after and before != kinds[i]:
+            for k in range(i, j + 1):
+                picked[k] = None
+                kinds[k] = None
+        i = j + 1
+
     runs = []
     current_kind = None
     current_start = None
@@ -385,9 +425,16 @@ def build_runs(picked: list[dict | None]) -> list[dict]:
                     'to_scan': i,  # last scan index of previous run (1-based)
                     'pages': current_pages,
                 })
+            if current_kind is None:
+                # unnumbered pages before the first number (cover, title,
+                # blank): keep them in the first run so every scan page is
+                # in exactly one run and the report stays aligned
+                current_start = 0
+                current_pages = current_pages + [p]
+            else:
+                current_start = i
+                current_pages = [p]
             current_kind = kind
-            current_start = i
-            current_pages = [p]
         else:
             current_pages.append(p)
 
@@ -520,13 +567,39 @@ def detect_issues(run_pages: list[dict], smoothed: list[int | None],
                 prev_offset = off
                 prev_i = i
                 continue
+            # the smoothed offsets must be backed by actual readings: at
+            # least 2 pages read with the old numbering just before the
+            # change and 2 with the new one just after (front matter with
+            # scattered numbers - contents entries, a cover - can produce a
+            # "change" out of noise)
+            def _n_fit(lo, hi, o):
+                return sum(1 for k in range(max(0, lo), min(n, hi))
+                           if run_pages[k]['source'] == 'read' and run_pages[k]['value'] is not None
+                           and run_pages[k]['value'] - k == o)
+            if _n_fit(prev_i - 5, i, prev_offset) < 2 or _n_fit(prev_i + 1, i + 6, off) < 2:
+                prev_offset = off
+                prev_i = i
+                continue
 
             if delta > 0:
                 # Offset went up → missing pages
                 # The missing printed numbers are between the last page before
                 # the jump and the first page after
-                last_before = run_pages[prev_i]['value']
-                first_after = run_pages[i]['value']
+                # The sliding mode says the numbering moved from prev_offset
+                # to off. Report the numbers that sequence skips (not the raw
+                # readings, which may be misreads: "cl" for "xii"), and pin
+                # the boundary to the last page read with the old numbering
+                # and the first page read with the new one.
+                def _read_fits(j, o):
+                    v = run_pages[j]['value']
+                    return run_pages[j]['source'] == 'read' and v is not None and v - j == o
+                olds = [j for j in range(max(0, prev_i - 3), min(n, i + 4)) if _read_fits(j, prev_offset)]
+                lo_j = max(olds) if olds else prev_i
+                news = [j for j in range(lo_j + 1, min(n, max(i, lo_j) + 5)) if _read_fits(j, off)]
+                hi_j = min(news) if news else i
+                last_before = lo_j + prev_offset
+                first_after = hi_j + off
+                prev_i, i_rep = lo_j, hi_j
                 if last_before is not None and first_after is not None:
                     missing_nums = list(range(last_before + 1, first_after))
                     if missing_nums:
@@ -535,7 +608,7 @@ def detect_issues(run_pages: list[dict], smoothed: list[int | None],
                         else:
                             printed = [str(v) for v in missing_nums]
                         scan_after = run_from + prev_i  # 1-based scan page
-                        scan_before = run_from + i       # 1-based scan page
+                        scan_before = run_from + i_rep   # 1-based scan page
                         if len(printed) == 1:
                             msg = f"Page {printed[0]} missing (between scan pages {scan_after} and {scan_before})"
                         else:
@@ -757,88 +830,92 @@ _GRID_LABELS_ROW = ['top', 'upper', 'middle', 'lower', 'bottom']
 _GRID_LABELS_COL = ['left', 'center-left', 'center-right', 'right']
 
 
-def _edge_sharpness(gray_block: np.ndarray) -> float | None:
-    """Sharpness of the letter edges in a block, independent of how much
-    text it holds: at strong edges (local contrast > 80), the gradient
-    divided by that contrast. A sharp edge goes from paper to ink in about
-    one pixel (high ratio), a blurred one over several (low ratio).
-    Laplacian variance was tried first: it mostly measures how much text a
-    block holds, and flagged half the pages of a sharp book.
-    Returns None if the block has too few edges to judge."""
-    f = gray_block.astype(np.float32)
-    gx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
-    grad = np.hypot(gx, gy) / 8.0
-    k = np.ones((5, 5), np.uint8)
-    contrast = cv2.dilate(gray_block, k).astype(np.float32) - cv2.erode(gray_block, k).astype(np.float32)
-    m = contrast > 80
-    if np.count_nonzero(m) < 200:
+def _letter_mask(gray: np.ndarray):
+    """Body-text letters of the page: (letter-pixel mask, component labels
+    of the letters, letter height). Headings (bigger type), rules, the shadow
+    of the page edge, stamps and the letters of the next page showing at the
+    edge of the photo are left out; blur is judged on running text only."""
+    binv = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                 cv2.THRESH_BINARY_INV, 31, 15)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(binv, 8)
+    hh, ww, area = st[1:, 3], st[1:, 2], st[1:, 4]
+    cand = (hh > 4) & (hh < 0.05 * gray.shape[0])
+    xh = float(np.median(hh[cand])) if cand.any() else 10.0
+    keep = (hh > 0.5 * xh) & (hh < 1.6 * xh) & (ww < 3 * xh) & (area > 8)
+    cx = st[1:, 0] + ww / 2.0
+    if keep.sum() >= 50:
+        x_lo, x_hi = np.percentile(cx[keep], [2, 98])
+        keep &= (cx > x_lo - 1.5 * xh) & (cx < x_hi + 1.5 * xh)
+    lut = np.zeros(n, np.int32)
+    lut[1:][keep] = np.arange(1, int(keep.sum()) + 1)
+    letters = lut[lab]
+    near = cv2.dilate((letters > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    return near, letters, xh
+
+
+def _block_sharpness(grad, contrast, near, letters, sl) -> float | None:
+    """Sharpness of the letter edges in one block, independent of how much
+    text it holds: at strong edges (local contrast > 80) of body-text
+    letters, the 90th percentile of gradient / contrast. A sharp edge goes
+    from paper to ink in about one pixel (high ratio), a blurred one over
+    several. A block full of letters with no crisp edge at all scores 0.
+    None = not enough running text to judge."""
+    if len(np.unique(letters[sl])) - 1 < BLUR_MIN_LETTERS:
         return None
-    return float(np.percentile(grad[m] / contrast[m], 90))
+    m = (contrast[sl] > 80) & near[sl]
+    if np.count_nonzero(m) < 200:
+        return 0.0
+    return float(np.percentile(grad[sl][m] / contrast[sl][m], 90))
 
 
 def detect_blur_page(gray: np.ndarray) -> dict | None:
     """
-    Detect partially blurry regions in a page image.
+    Detect partially blurry regions in a page photo.
 
-    Divides the page into a BLUR_GRID_ROWS x BLUR_GRID_COLS grid, computes
-    Laplacian variance per block, and flags blocks that are significantly
-    less sharp than the page's sharpest regions.
+    The page is split into a BLUR_GRID_ROWS x BLUR_GRID_COLS grid. Each block
+    with running text gets an edge-sharpness score (_block_sharpness), and
+    is compared with the sharp part of the same page (75th percentile), so
+    print quality and lighting don't matter. The page is flagged when its
+    softest block is below BLUR_RATIO_THRESHOLD of that.
 
-    Returns None if the page is fine, or a dict with:
-        blurry_regions: list of region label strings
-        scores: dict mapping region label -> variance score
-        max_score: the highest block score on the page
+    Tested on a 776-page book: flags 5 of the 6 pages its owner marked as
+    blurry (the 6th is very mild) plus one more slightly soft page, and none
+    of the ~400 sharp pages of 13 other test books.
+
+    Returns None if the page is fine, or a dict with blurry_regions,
+    scores and max_score.
     """
     h, w = gray.shape[:2]
     if h < 50 or w < 50:
         return None
-
-    bh = h // BLUR_GRID_ROWS
-    bw = w // BLUR_GRID_COLS
+    near, letters, xh = _letter_mask(gray)
+    f = gray.astype(np.float32)
+    grad = np.hypot(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3),
+                    cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)) / 8.0
+    k = np.ones((5, 5), np.uint8)
+    contrast = cv2.dilate(gray, k).astype(np.float32) - cv2.erode(gray, k).astype(np.float32)
 
     scores: dict[str, float] = {}
     for r in range(BLUR_GRID_ROWS):
         for c in range(BLUR_GRID_COLS):
-            y0 = r * bh
-            y1 = (r + 1) * bh if r < BLUR_GRID_ROWS - 1 else h
-            x0 = c * bw
-            x1 = (c + 1) * bw if c < BLUR_GRID_COLS - 1 else w
-            block = gray[y0:y1, x0:x1]
-
-            # Only blocks with real print in them: dark ink (< 128), not
-            # just faint show-through, stamps or the grey of a cover
-            dark = np.count_nonzero(block < 128) / block.size
-            if dark < BLUR_MIN_DARK:
-                continue
-
-            label = f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"
-            sh = _edge_sharpness(block)
-            if sh is not None:
-                scores[label] = sh
+            y0, y1 = r * h // BLUR_GRID_ROWS, (r + 1) * h // BLUR_GRID_ROWS
+            x0, x1 = c * w // BLUR_GRID_COLS, (c + 1) * w // BLUR_GRID_COLS
+            sc = _block_sharpness(grad, contrast, near, letters, (slice(y0, y1), slice(x0, x1)))
+            if sc is not None:
+                scores[f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"] = sc
 
     if len(scores) < BLUR_MIN_BLOCKS:
-        # Not enough text blocks to judge (cover, title page, short page)
         return None
-
-    # Compare with the page's own sharp text, so print quality and
-    # cleaning don't matter: only a block clearly softer than the sharp
-    # part of the same page counts.
     ref = float(np.percentile(list(scores.values()), 75))
-    max_score = max(scores.values())
-    if ref <= 0:
+    if not ref > 0:
         return None
-
-    blurry = [label for label, score in scores.items()
-              if score / ref < BLUR_RATIO_THRESHOLD]
-
-    if len(blurry) < BLUR_MIN_BLURRY_BLOCKS:
+    if min(scores.values()) / ref >= BLUR_RATIO_THRESHOLD:
         return None
-
+    blurry = [lbl for lbl, v in scores.items() if v / ref < BLUR_REGION_RATIO]
     return {
         'blurry_regions': blurry,
-        'scores': {k: round(v, 1) for k, v in scores.items()},
-        'max_score': round(max_score, 1),
+        'scores': {k_: round(v / ref, 3) for k_, v in scores.items()},
+        'max_score': round(max(scores.values()), 3),
     }
 
 
@@ -982,8 +1059,76 @@ def render_thumbnails(pdf_path: str, total: int) -> list[np.ndarray]:
 
 # ── Main entry point ─────────────────────────────────────────────────
 
+def detect_substitutes(runs: list[dict], all_pages: list[dict],
+                       page_texts: list[str] | None,
+                       thumbnails: list) -> list[dict]:
+    """A page photographed in the wrong place: where page E should be, the
+    scan shows page V instead, and V is also in its own place further on
+    (page 1147 missing, its scan is a second copy of page 1179). The page
+    numbers look like a one-page misread, so the sequence check can't see
+    it. It is reported only when the out-of-place number is confirmed by
+    the content: the two scans look alike (thumbnail correlation >= 0.5;
+    a misread page number next to an unrelated page scored at most 0.39)
+    or share their text (when OCR text is available).
+    Reports both: E missing, and V duplicated."""
+    issues = []
+    for run in runs:
+        sm = run.get('smoothed') or []
+        base = run['from_scan'] - 1
+        pages = all_pages[base:base + len(sm)]
+        n = min(len(sm), len(pages))
+        present = {p['value'] for p in pages if p.get('source') == 'read' and p.get('value') is not None}
+        for k, p in enumerate(pages):
+            v, o = p.get('value'), sm[k] if k < n else None
+            if p.get('source') != 'read' or v is None or o is None or v - k == o:
+                continue
+            j = v - o
+            if not (0 <= j < n) or abs(j - k) < 1:
+                continue
+            q = pages[j]
+            if q.get('value') != v:
+                continue
+            expected = k + o
+            if expected in present:
+                continue
+            a, b = base + k, base + j
+            same = False
+            how = ''
+            if page_texts is not None and a < len(page_texts) and b < len(page_texts):
+                ga, gb = _text_ngrams(page_texts[a]), _text_ngrams(page_texts[b])
+                if len(ga) >= 15 and len(gb) >= 15:
+                    ov = len(ga & gb) / min(len(ga), len(gb))
+                    if ov > 0.5:
+                        same, how = True, f'same text ({ov:.0%})'
+            if not same and a < len(thumbnails) and b < len(thumbnails) \
+                    and thumbnails[a] is not None and thumbnails[b] is not None:
+                corr = _image_correlation(thumbnails[a], thumbnails[b])
+                if corr >= 0.5:
+                    same, how = True, f'images alike ({corr:.2f})'
+            if not same:
+                continue
+            fmt = (lambda x: int_to_roman(x)) if run['kind'] == 'roman' else str
+            e_s, v_s = fmt(expected), fmt(v)
+            sa, sb = a + 1, b + 1
+            issues.append({
+                'type': 'missing', 'confidence': 'high', 'printed': [e_s],
+                'after_scan': sa, 'before_scan': sa,
+                'message': (f"Page {e_s} missing: scan page {sa} is a second copy of "
+                            f"page {v_s} (also on scan page {sb})"),
+                'evidence': how,
+            })
+            issues.append({
+                'type': 'duplicate', 'confidence': 'high', 'printed': [v_s],
+                'after_scan': min(sa, sb), 'before_scan': max(sa, sb),
+                'message': f"Page {v_s} appears on both scan pages {min(sa, sb)} and {max(sa, sb)}",
+                'evidence': how,
+            })
+    return issues
+
+
 def audit_book(output_pdf: str, tmp_dir: str,
-               ocr_json_path: str | None = None) -> dict:
+               ocr_json_path: str | None = None,
+               source_pdf: str | None = None) -> dict:
     """
     Run page-number audit on a processed book.
 
@@ -991,6 +1136,9 @@ def audit_book(output_pdf: str, tmp_dir: str,
         output_pdf: path to the output PDF
         tmp_dir: directory for writing page_audit.json
         ocr_json_path: path to ocr_results.json (None if OCR was off)
+        source_pdf: the uploaded PDF (the photos). Blur is judged on the
+            photos: cleaning sharpens soft text and hides blur. Defaults to
+            output_pdf (check-only jobs, where they are the same file).
 
     Returns:
         The audit report dict (also written to tmp_dir/page_audit.json).
@@ -1099,12 +1247,41 @@ def audit_book(output_pdf: str, tmp_dir: str,
 
     # ── Step E: content checks for duplicates ─────────────────────
     all_issues = check_duplicates(all_issues, all_pages, page_texts, thumbnails)
+    try:
+        all_issues += detect_substitutes(runs, all_pages, page_texts, thumbnails)
+    except Exception as e:
+        print(f"[audit] Wrong-page check failed: {e}", file=sys.stderr)
     all_issues = _merge_duplicates(all_issues)
 
     # ── Step F: blur detection ─────────────────────────────────────
     try:
         blanks = [p.get('blank', False) for p in all_pages]
-        blur_issues = detect_blur_all(output_pdf, total, blanks)
+        blur_src = source_pdf if source_pdf and os.path.isfile(source_pdf) else output_pdf
+        blur_issues = detect_blur_all(blur_src, total, blanks)
+        # name the page by its printed number when it is known (that is the
+        # number the user looks for in the book), scan page in brackets
+        # expected number of each scan page from its run's sequence (a blurry
+        # page's own number is often misread: 1287 read as "12")
+        expected = {}
+        for run in runs:
+            sm = run.get('smoothed') or []
+            for k, o in enumerate(sm):
+                if o is not None:
+                    expected[run['from_scan'] - 1 + k] = (k + o, run['kind'])
+        for bi in blur_issues:
+            si = bi['after_scan'] - 1
+            pg = all_pages[si] if 0 <= si < len(all_pages) else None
+            val = pg.get('value') if pg else None
+            if si in expected:
+                val = expected[si][0]
+                pg = dict(pg or {}, kind=expected[si][1])
+            region = bi['message'].split('(', 1)[1].rstrip(')') if '(' in bi['message'] else ''
+            if val is not None:
+                shown = int_to_roman(val) if pg.get('kind') == 'roman' else str(val)
+                bi['printed'] = [shown]
+                bi['message'] = f"Page {shown} (scan page {si + 1}) is partly blurry ({region})"
+            else:
+                bi['message'] = f"Scan page {si + 1} is partly blurry ({region})"
         all_issues.extend(blur_issues)
     except Exception as e:
         print(f"[audit] Blur detection failed: {e}", file=sys.stderr)
