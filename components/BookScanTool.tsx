@@ -8,6 +8,8 @@ import { naturalSortCompare } from '@/lib/naturalSort';
 import { validatePdf, loadPdfDocument } from '@/lib/pdf/render';
 import { runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
 import { runReplacePipeline } from '@/lib/replacePipeline';
+import { clearThumbnailCache } from '@/lib/pdf/thumbnail';
+import { loadForExtraction, clearExtraction } from '@/lib/pdf/extractThumb';
 import { runFullfixPipeline } from '@/lib/fullfixPipeline';
 
 import { BookNameInput } from './BookNameInput';
@@ -446,8 +448,12 @@ export function BookScanTool() {
     (file: File | null) => {
       if (locked) return;
 
-      // Clean up previous PDF
-      if (replacePdf) replacePdf.destroy();
+      // Clean up previous PDF and its cached thumbnails
+      clearExtraction();
+      if (replacePdf) {
+        clearThumbnailCache(replacePdf);
+        replacePdf.destroy();
+      }
       setReplacePdf(null);
       setReplacements(new Map());
       setDeletions(new Set());
@@ -485,6 +491,10 @@ export function BookScanTool() {
             setReplacePageCount(result.pageCount);
             setPageOrder(Array.from({ length: result.pageCount }, (_, i) => i + 1));
             setReplaceIsValidating(false);
+            // Load pdf-lib document for fast JPEG extraction (thumbnails)
+            file.arrayBuffer().then((ab) =>
+              loadForExtraction(new Uint8Array(ab))
+            ).catch(() => { /* extraction is optional, pdfjs fallback works */ });
             // Load PDFDocumentProxy for thumbnail rendering
             loadPdfDocument(file).then((pdf) => {
               setReplacePdf(pdf);
@@ -611,7 +621,11 @@ export function BookScanTool() {
   // --- Clean up PDFs on unmount ---
   useEffect(() => {
     return () => {
-      if (replacePdf) replacePdf.destroy();
+      clearExtraction();
+      if (replacePdf) {
+        clearThumbnailCache(replacePdf);
+        replacePdf.destroy();
+      }
     };
   }, [replacePdf]);
 

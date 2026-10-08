@@ -33,7 +33,7 @@ export const JPEG_QUALITY = 0.85;
 export const AUTO_CROP = true;
 
 /** Width in pixels for page thumbnails in Replace Pages mode */
-export const THUMBNAIL_WIDTH = 180;
+export const THUMBNAIL_WIDTH = 140;
 
 /** Width in pixels for fullscreen viewer page renders */
 export const FULLSCREEN_RENDER_WIDTH = 900;
