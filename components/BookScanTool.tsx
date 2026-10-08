@@ -1058,138 +1058,148 @@ export function BookScanTool() {
           )}
         </section>
       ) : (
-        <section className="mx-auto mb-8 sm:mb-10" style={{ maxWidth: '32rem' }}>
-          <h2
-            className="text-sm font-semibold uppercase tracking-wider mb-4"
-            style={{ color: 'var(--color-ink-muted)' }}
-          >
-            PDF files
-          </h2>
-          <FixDropZone
-            file={fixFiles.length > 0 ? null : fixFile}
-            pageCount={fixFiles.length > 0 ? null : fixPageCount}
-            error={fixFiles.length > 0 ? null : fixError}
-            isValidating={fixFiles.length > 0 ? false : fixIsValidating}
-            locked={locked}
-            onFileChange={handleFixFileChange}
-            multiple
-            onMultiFileAdd={handleFixFilesAdd}
-          />
-
-          {/* File queue list */}
-          {fixFiles.length > 0 && (
-            <div
-              className="mt-3 flex flex-col gap-1"
-              style={{
-                background: 'var(--color-surface-card)',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-lg)',
-                overflow: 'hidden',
-              }}
-            >
-              {fixFiles.map((entry, idx) => (
-                <div
-                  key={entry.id}
-                  className="flex items-center gap-3 px-4 py-2.5"
-                  style={{
-                    borderBottom: idx < fixFiles.length - 1 ? '1px solid var(--color-border)' : 'none',
-                    opacity: entry.status === 'done' ? 0.6 : entry.error ? 0.5 : 1,
-                  }}
-                >
-                  {/* Status icon */}
-                  {entry.status === 'done' ? (
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-success)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <polyline points="3 8 6.5 11.5 13 5" />
-                    </svg>
-                  ) : entry.status === 'processing' ? (
-                    <div
-                      className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin"
-                      style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
-                    />
-                  ) : entry.error ? (
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-danger)" strokeWidth="2" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                      <line x1="4" y1="4" x2="12" y2="12" />
-                      <line x1="12" y1="4" x2="4" y2="12" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-ink-subtle)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                  )}
-
-                  {/* Filename + page count */}
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className="text-sm truncate"
-                      style={{ color: entry.error ? 'var(--color-danger)' : 'var(--color-ink)' }}
-                      title={entry.file.name}
-                    >
-                      {entry.file.name}
-                    </p>
-                    {entry.error && (
-                      <p className="text-xs" style={{ color: 'var(--color-danger)' }}>{entry.error}</p>
-                    )}
-                  </div>
-
-                  {/* Page count badge */}
-                  {entry.pageCount !== null && !entry.error && (
-                    <span
-                      className="text-xs font-medium px-2 py-0.5"
-                      style={{
-                        background: 'var(--color-accent-subtle)',
-                        color: 'var(--color-accent-hover)',
-                        borderRadius: 'var(--radius-sm)',
-                        flexShrink: 0,
-                      }}
-                    >
-                      {entry.pageCount} pg
-                    </span>
-                  )}
-
-                  {entry.isValidating && (
-                    <div
-                      className="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin"
-                      style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
-                    />
-                  )}
-
-                  {/* Remove button (only when pending and not locked) */}
-                  {entry.status === 'pending' && !locked && (
-                    <button
-                      type="button"
-                      onClick={() => handleFixFileRemove(entry.id)}
-                      className="focus-ring flex items-center justify-center w-6 h-6"
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: 'var(--color-ink-subtle)',
-                        cursor: 'pointer',
-                        flexShrink: 0,
-                        padding: 0,
-                      }}
-                      aria-label={`Remove ${entry.file.name}`}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <line x1="2" y1="2" x2="10" y2="10" />
-                        <line x1="10" y1="2" x2="2" y2="10" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Fix options */}
+        <section className="mx-auto mb-8 sm:mb-10" style={{ maxWidth: '56rem' }}>
           <div
-            className="mt-5 p-4 flex flex-col gap-3"
             style={{
-              background: 'var(--color-surface-card)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-lg)',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 24rem), 1fr))',
+              gap: '1.5rem',
+              alignItems: 'start',
             }}
           >
+            {/* Left column: PDF files + options + start */}
+            <div>
+              <h2
+                className="text-sm font-semibold uppercase tracking-wider mb-4"
+                style={{ color: 'var(--color-ink-muted)' }}
+              >
+                PDF files
+              </h2>
+              <FixDropZone
+                file={fixFiles.length > 0 ? null : fixFile}
+                pageCount={fixFiles.length > 0 ? null : fixPageCount}
+                error={fixFiles.length > 0 ? null : fixError}
+                isValidating={fixFiles.length > 0 ? false : fixIsValidating}
+                locked={locked}
+                onFileChange={handleFixFileChange}
+                multiple
+                onMultiFileAdd={handleFixFilesAdd}
+              />
+
+              {/* File queue list */}
+              {fixFiles.length > 0 && (
+                <div
+                  className="mt-3 flex flex-col gap-1"
+                  style={{
+                    background: 'var(--color-surface-card)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-lg)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {fixFiles.map((entry, idx) => (
+                    <div
+                      key={entry.id}
+                      className="flex items-center gap-3 px-4 py-2.5"
+                      style={{
+                        borderBottom: idx < fixFiles.length - 1 ? '1px solid var(--color-border)' : 'none',
+                        opacity: entry.status === 'done' ? 0.6 : entry.error ? 0.5 : 1,
+                      }}
+                    >
+                      {/* Status icon */}
+                      {entry.status === 'done' ? (
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-success)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <polyline points="3 8 6.5 11.5 13 5" />
+                        </svg>
+                      ) : entry.status === 'processing' ? (
+                        <div
+                          className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin"
+                          style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
+                        />
+                      ) : entry.error ? (
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-danger)" strokeWidth="2" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                          <line x1="4" y1="4" x2="12" y2="12" />
+                          <line x1="12" y1="4" x2="4" y2="12" />
+                        </svg>
+                      ) : (
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-ink-subtle)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                        </svg>
+                      )}
+
+                      {/* Filename + page count */}
+                      <div className="flex-1 min-w-0">
+                        <p
+                          className="text-sm truncate"
+                          style={{ color: entry.error ? 'var(--color-danger)' : 'var(--color-ink)' }}
+                          title={entry.file.name}
+                        >
+                          {entry.file.name}
+                        </p>
+                        {entry.error && (
+                          <p className="text-xs" style={{ color: 'var(--color-danger)' }}>{entry.error}</p>
+                        )}
+                      </div>
+
+                      {/* Page count badge */}
+                      {entry.pageCount !== null && !entry.error && (
+                        <span
+                          className="text-xs font-medium px-2 py-0.5"
+                          style={{
+                            background: 'var(--color-accent-subtle)',
+                            color: 'var(--color-accent-hover)',
+                            borderRadius: 'var(--radius-sm)',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {entry.pageCount} pg
+                        </span>
+                      )}
+
+                      {entry.isValidating && (
+                        <div
+                          className="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin"
+                          style={{ borderColor: 'var(--color-primary)', borderTopColor: 'transparent', flexShrink: 0 }}
+                        />
+                      )}
+
+                      {/* Remove button (only when pending and not locked) */}
+                      {entry.status === 'pending' && !locked && (
+                        <button
+                          type="button"
+                          onClick={() => handleFixFileRemove(entry.id)}
+                          className="focus-ring flex items-center justify-center w-6 h-6"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--color-ink-subtle)',
+                            cursor: 'pointer',
+                            flexShrink: 0,
+                            padding: 0,
+                          }}
+                          aria-label={`Remove ${entry.file.name}`}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                            <line x1="2" y1="2" x2="10" y2="10" />
+                            <line x1="10" y1="2" x2="2" y2="10" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Fix options */}
+              <div
+                className="mt-5 p-4 flex flex-col gap-3"
+                style={{
+                  background: 'var(--color-surface-card)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-lg)',
+                }}
+              >
             <div className="flex items-center justify-between">
               <p
                 className="text-xs font-semibold uppercase tracking-wider"
@@ -1361,12 +1371,274 @@ export function BookScanTool() {
                 </span>
               </div>
             </label>
+              </div>
+
+              {/* Start button inside left column */}
+              {status === 'idle' && (
+                <div className="mt-5 flex flex-col items-center">
+                  <button
+                    type="button"
+                    onClick={handleStart}
+                    disabled={!canStart}
+                    className="focus-ring w-full px-8 py-4 text-lg font-semibold transition-all"
+                    style={{
+                      background: canStart ? 'var(--color-primary)' : 'var(--color-border)',
+                      color: canStart ? '#ffffff' : 'var(--color-ink-subtle)',
+                      borderRadius: 'var(--radius-lg)',
+                      border: 'none',
+                      cursor: canStart ? 'pointer' : 'not-allowed',
+                      boxShadow: canStart ? 'var(--shadow-md)' : 'none',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (canStart) {
+                        e.currentTarget.style.background = 'var(--color-primary-hover)';
+                        e.currentTarget.style.boxShadow = 'var(--shadow-lg)';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (canStart) {
+                        e.currentTarget.style.background = 'var(--color-primary)';
+                        e.currentTarget.style.boxShadow = 'var(--shadow-md)';
+                      }
+                    }}
+                  >
+                    Start
+                  </button>
+                  {startHint && (
+                    <p className="mt-2 text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                      {startHint}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Right column: progress / result / error */}
+            <div>
+              {status === 'idle' && (
+                <div
+                  className="flex flex-col items-center justify-center gap-4"
+                  style={{
+                    minHeight: 260,
+                    padding: '2rem 1rem',
+                    background: 'var(--color-surface-card)',
+                    border: '1px dashed var(--color-border)',
+                    borderRadius: 'var(--radius-xl)',
+                  }}
+                >
+                  {/* Animated page straightening illustration */}
+                  <svg
+                    width="80"
+                    height="100"
+                    viewBox="0 0 80 100"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                  >
+                    {/* Shadow beneath */}
+                    <ellipse cx="40" cy="92" rx="24" ry="4" fill="oklch(80% 0.01 270 / 0.25)">
+                      <animate
+                        attributeName="rx"
+                        values="20;24;20"
+                        dur="3s"
+                        repeatCount="indefinite"
+                      />
+                    </ellipse>
+
+                    {/* Page — rotates from skewed to straight and back */}
+                    <g style={{ transformOrigin: '40px 50px' }}>
+                      <animateTransform
+                        attributeName="transform"
+                        type="rotate"
+                        values="8,40,50;0,40,50;0,40,50;8,40,50"
+                        keyTimes="0;0.3;0.7;1"
+                        dur="3s"
+                        repeatCount="indefinite"
+                      />
+                      {/* Page body */}
+                      <rect
+                        x="16" y="10" width="48" height="68" rx="3"
+                        fill="var(--color-surface-page)"
+                        stroke="var(--color-border)"
+                        strokeWidth="1.5"
+                      />
+                      {/* Text lines */}
+                      <rect x="24" y="24" width="32" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.35)" />
+                      <rect x="24" y="32" width="28" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.25)" />
+                      <rect x="24" y="40" width="32" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.35)" />
+                      <rect x="24" y="48" width="24" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.25)" />
+                      <rect x="24" y="56" width="30" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.35)" />
+                      <rect x="24" y="64" width="20" height="2.5" rx="1" fill="oklch(70% 0.02 270 / 0.25)" />
+                    </g>
+
+                    {/* Straighten arrow — fades in/out with the correction */}
+                    <g opacity="0">
+                      <animate
+                        attributeName="opacity"
+                        values="0;0.7;0.7;0"
+                        keyTimes="0;0.15;0.4;0.55"
+                        dur="3s"
+                        repeatCount="indefinite"
+                      />
+                      <path
+                        d="M66 18 C70 18, 72 22, 70 26"
+                        stroke="var(--color-primary)"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        fill="none"
+                      />
+                      <path
+                        d="M68 15 L66 18 L69 19"
+                        stroke="var(--color-primary)"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        fill="none"
+                      />
+                    </g>
+                  </svg>
+                  <p
+                    className="text-sm text-center"
+                    style={{ color: 'var(--color-ink-subtle)', maxWidth: '16rem', lineHeight: 1.5 }}
+                  >
+                    Results will appear here once processing starts
+                  </p>
+                </div>
+              )}
+
+              {status === 'processing' && (
+                <div>
+                  {fixQueueLabel && (
+                    <p
+                      className="text-sm font-medium mb-3"
+                      style={{ color: 'var(--color-ink-muted)' }}
+                    >
+                      {fixQueueLabel}
+                    </p>
+                  )}
+                  <ProgressPanel
+                    phase={progressPhase}
+                    current={progress.current}
+                    total={progress.total}
+                    onCancel={handleCancel}
+                  />
+                </div>
+              )}
+
+              {status === 'done' && (
+                <div>
+                  {fixFiles.filter((f) => f.status === 'done').length > 1 ? (
+                    <div
+                      className="p-6 flex flex-col items-center gap-5"
+                      style={{
+                        background: 'var(--color-surface-card)',
+                        border: '1.5px solid var(--color-border)',
+                        borderRadius: 'var(--radius-xl)',
+                        boxShadow: 'var(--shadow-md)',
+                      }}
+                    >
+                      <div
+                        className="flex items-center justify-center w-14 h-14"
+                        style={{ background: 'oklch(92% 0.06 155)', borderRadius: '50%' }}
+                      >
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--color-success)' }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-base font-semibold" style={{ color: 'var(--color-ink)' }}>
+                          All books processed
+                        </p>
+                        <p className="mt-1 text-sm" style={{ color: 'var(--color-ink-muted)' }}>
+                          {fixFiles.filter((f) => f.status === 'done').length} books downloaded
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleStartOver}
+                        className="focus-ring px-5 py-2 text-sm font-medium transition-colors"
+                        style={{
+                          background: 'transparent',
+                          border: '1.5px solid var(--color-border-strong)',
+                          borderRadius: 'var(--radius-md)',
+                          color: 'var(--color-ink-muted)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Start over
+                      </button>
+                    </div>
+                  ) : downloadUrl ? (
+                    <ResultPanel
+                      filename={downloadFilename}
+                      totalPages={resultTotalPages}
+                      downloadUrl={downloadUrl}
+                      angles={resultAngles}
+                      ocrEnabled={fullfixOcr}
+                      auditEnabled={fullfixAudit}
+                      onStartOver={handleStartOver}
+                    />
+                  ) : (
+                    <div className="flex justify-center">
+                      <button
+                        type="button"
+                        onClick={handleStartOver}
+                        className="focus-ring px-5 py-2.5 text-sm font-medium transition-colors"
+                        style={{
+                          background: 'transparent',
+                          border: '1.5px solid var(--color-border-strong)',
+                          borderRadius: 'var(--radius-md)',
+                          color: 'var(--color-ink-muted)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Start over
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {status === 'error' && (
+                <div
+                  className="p-6 flex flex-col items-center gap-4"
+                  style={{
+                    background: 'var(--color-danger-subtle)',
+                    border: '1.5px solid var(--color-danger)',
+                    borderRadius: 'var(--radius-xl)',
+                  }}
+                >
+                  <p className="text-sm font-medium" style={{ color: 'var(--color-danger)' }}>
+                    Something went wrong
+                  </p>
+                  {errorMessage && (
+                    <p className="text-xs text-center" style={{ color: 'var(--color-ink-muted)' }}>
+                      {errorMessage}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleStartOver}
+                    className="focus-ring px-5 py-2 text-sm font-medium transition-colors"
+                    style={{
+                      background: 'transparent',
+                      border: '1.5px solid var(--color-border-strong)',
+                      borderRadius: 'var(--radius-md)',
+                      color: 'var(--color-ink-muted)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Start over
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </section>
       )}
 
-      {/* Start button (hidden during processing/done, hidden in replace mode when sticky bar shown) */}
-      {status === 'idle' && !showStickyDownload && (
+      {/* Start button for non-fullfix modes */}
+      {mode !== 'fullfix' && status === 'idle' && !showStickyDownload && (
         <section className="flex flex-col items-center mb-8">
           <button
             type="button"
@@ -1405,17 +1677,9 @@ export function BookScanTool() {
         </section>
       )}
 
-      {/* Progress panel */}
-      {status === 'processing' && (
+      {/* Progress panel for non-fullfix modes */}
+      {mode !== 'fullfix' && status === 'processing' && (
         <section className="mb-8">
-          {fixQueueLabel && (
-            <p
-              className="text-center text-sm font-medium mb-3"
-              style={{ color: 'var(--color-ink-muted)' }}
-            >
-              {fixQueueLabel}
-            </p>
-          )}
           <ProgressPanel
             phase={progressPhase}
             current={progress.current}
@@ -1425,68 +1689,20 @@ export function BookScanTool() {
         </section>
       )}
 
-      {/* Result panel */}
-      {status === 'done' && (
+      {/* Result panel for non-fullfix modes */}
+      {mode !== 'fullfix' && status === 'done' && (
         <section className="mb-8">
-          {mode === 'fullfix' && fixFiles.filter((f) => f.status === 'done').length > 1 ? (
-            /* Multi-book done summary */
-            <div
-              className="w-full mx-auto flex flex-col items-center gap-5"
-              style={{ maxWidth: '36rem' }}
-            >
-              <div
-                className="w-full p-6 sm:p-8 flex flex-col items-center gap-5"
-                style={{
-                  background: 'var(--color-surface-card)',
-                  border: '1.5px solid var(--color-border)',
-                  borderRadius: 'var(--radius-xl)',
-                  boxShadow: 'var(--shadow-md)',
-                }}
-              >
-                <div
-                  className="flex items-center justify-center w-14 h-14"
-                  style={{ background: 'oklch(92% 0.06 155)', borderRadius: '50%' }}
-                >
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--color-success)' }}>
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </div>
-                <div className="text-center">
-                  <p className="text-base font-semibold" style={{ color: 'var(--color-ink)' }}>
-                    All books processed
-                  </p>
-                  <p className="mt-1 text-sm" style={{ color: 'var(--color-ink-muted)' }}>
-                    {fixFiles.filter((f) => f.status === 'done').length} books downloaded
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleStartOver}
-                  className="focus-ring px-5 py-2 text-sm font-medium transition-colors"
-                  style={{
-                    background: 'transparent',
-                    border: '1.5px solid var(--color-border-strong)',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--color-ink-muted)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Start over
-                </button>
-              </div>
-            </div>
-          ) : downloadUrl ? (
+          {downloadUrl ? (
             <ResultPanel
               filename={downloadFilename}
               totalPages={resultTotalPages}
               downloadUrl={downloadUrl}
               angles={resultAngles}
-              ocrEnabled={mode === 'fullfix' && fullfixOcr}
-              auditEnabled={mode === 'fullfix' && fullfixAudit}
+              ocrEnabled={false}
+              auditEnabled={false}
               onStartOver={handleStartOver}
             />
           ) : (
-            /* Done but no download URL (e.g. all-queue done with native downloads) */
             <div className="flex justify-center">
               <button
                 type="button"
@@ -1507,8 +1723,8 @@ export function BookScanTool() {
         </section>
       )}
 
-      {/* Error state */}
-      {status === 'error' && (
+      {/* Error state for non-fullfix modes */}
+      {mode !== 'fullfix' && status === 'error' && (
         <section className="flex justify-center mb-8">
           <div
             className="w-full mx-auto p-6 flex flex-col items-center gap-4"
