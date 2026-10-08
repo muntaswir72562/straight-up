@@ -9,7 +9,7 @@ import { validatePdf, loadPdfDocument } from '@/lib/pdf/render';
 import { runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
 import { runReplacePipeline } from '@/lib/replacePipeline';
 import { runFullfixPipeline } from '@/lib/fullfixPipeline';
-import { runMergeV2Pipeline } from '@/lib/straightenPipeline';
+
 import { BookNameInput } from './BookNameInput';
 import { SlotGrid } from './SlotGrid';
 import { FixDropZone } from './FixDropZone';
@@ -48,7 +48,7 @@ export function BookScanTool() {
   // --- Merge mode state ---
   const [bookName, setBookName] = useState('');
   const [slots, setSlots] = useState<SlotData[]>(() => createSlots(SLOTS_DEFAULT, 1));
-  const [mergeV2, setMergeV2] = useState(false);
+
 
   // --- Full fix mode state ---
   const [fixFile, setFixFile] = useState<File | null>(null);
@@ -662,9 +662,7 @@ export function BookScanTool() {
 
       let result;
       if (mode === 'merge') {
-        result = mergeV2
-          ? await runMergeV2Pipeline(slots, bookName, progressCb, cancelRef.current)
-          : await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
+        result = await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = replaceFile!.name.replace(/\.pdf$/i, '');
         result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, name, progressCb, cancelRef.current);
@@ -723,7 +721,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, mergeV2, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
+  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -942,44 +940,6 @@ export function BookScanTool() {
             </button>
           </div>
 
-          {/* Merge options */}
-          <div
-            className="mt-5 mx-auto p-4 flex flex-col gap-3"
-            style={{
-              maxWidth: '32rem',
-              background: 'var(--color-surface-card)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-lg)',
-            }}
-          >
-            <p
-              className="text-xs font-semibold uppercase tracking-wider"
-              style={{ color: 'var(--color-ink-muted)' }}
-            >
-              Options
-            </p>
-            <label
-              className="flex items-center gap-3 cursor-pointer select-none"
-              style={{ opacity: locked ? 0.5 : 1 }}
-            >
-              <input
-                type="checkbox"
-                checked={mergeV2}
-                onChange={(e) => setMergeV2(e.target.checked)}
-                disabled={locked}
-                className="accent-[var(--color-primary)]"
-                style={{ width: 18, height: 18 }}
-              />
-              <div className="flex flex-col">
-                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
-                  Straighten & Dewarp v2
-                </span>
-                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
-                  Advanced: perspective correction, text-line dewarping, column alignment
-                </span>
-              </div>
-            </label>
-          </div>
         </section>
       ) : mode === 'replace' ? (
         <section className="mb-8 sm:mb-10">
