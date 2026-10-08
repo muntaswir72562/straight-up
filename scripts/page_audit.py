@@ -868,7 +868,7 @@ def _block_sharpness(grad, contrast, near, letters, sl) -> float | None:
     return float(np.percentile(grad[sl][m] / contrast[sl][m], 90))
 
 
-def detect_blur_page(gray: np.ndarray) -> dict | None:
+def detect_blur_page(gray: np.ndarray, colour: np.ndarray | None = None) -> dict | None:
     """
     Detect partially blurry regions in a page photo.
 
@@ -889,6 +889,19 @@ def detect_blur_page(gray: np.ndarray) -> dict | None:
     if h < 50 or w < 50:
         return None
     near, letters, xh = _letter_mask(gray)
+    if colour is not None and colour.any():
+        # drop letters printed in colour (stamps): any letter component
+        # with more than a third of its pixels coloured
+        lab_ids = letters[letters > 0]
+        col_ids = letters[(letters > 0) & colour]
+        if col_ids.size:
+            tot = np.bincount(lab_ids, minlength=letters.max() + 1)
+            col = np.bincount(col_ids, minlength=letters.max() + 1)
+            bad = np.nonzero(col > tot / 3.0)[0]
+            if bad.size:
+                drop = np.isin(letters, bad)
+                letters = np.where(drop, 0, letters)
+                near = near & ~cv2.dilate(drop.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     f = gray.astype(np.float32)
     grad = np.hypot(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3),
                     cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)) / 8.0
@@ -934,12 +947,22 @@ def detect_blur_all(pdf_path: str, total: int,
             continue
 
         page = doc[i]
-        pix = page.get_pixmap(dpi=BLUR_DPI, colorspace=fitz.csGRAY)
-        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.h, pix.w).copy()
+        pix = page.get_pixmap(dpi=BLUR_DPI)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
         del pix
+        if img.shape[2] >= 3:
+            rgb = img[:, :, :3]
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            # coloured ink (a blue or red library stamp, a highlighter) is
+            # not print: keep it out of the blur check
+            chroma = rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(np.int16)
+            colour = chroma > 40
+        else:
+            gray = img[:, :, 0].copy()
+            colour = None
+        del img
 
-        result = detect_blur_page(gray)
+        result = detect_blur_page(gray, colour)
         del gray
 
         if result:
