@@ -18,6 +18,8 @@ interface PageGridProps {
   deletions: Set<number>;
   insertions: Insertion[];
   locked: boolean;
+  pageOrder: number[];
+  selectedPages: Set<number>;
   onPageClick: (pageNumber: number) => void;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
@@ -26,6 +28,10 @@ interface PageGridProps {
   onInsert: (afterPage: number, file: File) => void;
   onRemoveInsert: (id: string) => void;
   onOpenFullscreen: () => void;
+  onToggleSelect: (pageNumber: number) => void;
+  onMoveTo: (afterPage: number) => void;
+  onClearSelection: () => void;
+  onResetOrder: () => void;
 }
 
 function isAcceptedFile(file: File): boolean {
@@ -130,6 +136,8 @@ export function PageGrid({
   deletions,
   insertions,
   locked,
+  pageOrder,
+  selectedPages,
   onPageClick,
   onReplace,
   onUndoReplace,
@@ -138,13 +146,28 @@ export function PageGrid({
   onInsert,
   onRemoveInsert,
   onOpenFullscreen,
+  onToggleSelect,
+  onMoveTo,
+  onClearSelection,
+  onResetOrder,
 }: PageGridProps) {
+  const [moveTarget, setMoveTarget] = useState('');
+
   const replaceCount = replacements.size;
   const deleteCount = deletions.size;
   const insertCount = insertions.length;
   const outputPages = totalPages - deleteCount + insertCount;
 
-  // Build flat list of grid items (no insert buttons — those are hover zones now)
+  const isDefaultOrder = pageOrder.length === totalPages && pageOrder.every((pn, i) => pn === i + 1);
+  const movedCount = isDefaultOrder ? 0 : pageOrder.filter((pn, i) => pn !== i + 1).length;
+  const anySelected = selectedPages.size > 0;
+
+  // Use pageOrder for display sequence
+  const orderedPages = pageOrder.length === totalPages
+    ? pageOrder
+    : Array.from({ length: totalPages }, (_, i) => i + 1);
+
+  // Build flat list of grid items
   type GridItem =
     | { kind: 'inserted'; insertion: Insertion; key: string }
     | { kind: 'page'; pageNum: number; key: string };
@@ -156,14 +179,22 @@ export function PageGrid({
     items.push({ kind: 'inserted', insertion: ins, key: `inserted-${ins.id}` });
   }
 
-  for (let i = 1; i <= totalPages; i++) {
-    items.push({ kind: 'page', pageNum: i, key: `page-${i}` });
+  for (const pageNum of orderedPages) {
+    items.push({ kind: 'page', pageNum, key: `page-${pageNum}` });
 
     // Insertions after this page
-    for (const ins of insertions.filter((ins) => ins.afterPage === i)) {
+    for (const ins of insertions.filter((ins) => ins.afterPage === pageNum)) {
       items.push({ kind: 'inserted', insertion: ins, key: `inserted-${ins.id}` });
     }
   }
+
+  const handleMoveSubmit = useCallback(() => {
+    const val = parseInt(moveTarget, 10);
+    if (!isNaN(val) && val >= 0 && val <= totalPages) {
+      onMoveTo(val);
+      setMoveTarget('');
+    }
+  }, [moveTarget, totalPages, onMoveTo]);
 
   return (
     <div>
@@ -193,6 +224,22 @@ export function PageGrid({
                 <path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8" />
               </svg>
               Fullscreen
+            </button>
+          )}
+          {movedCount > 0 && !locked && (
+            <button
+              type="button"
+              onClick={onResetOrder}
+              className="focus-ring flex items-center gap-1.5 text-xs font-medium px-2.5 py-1"
+              style={{
+                background: 'var(--color-surface-inset)',
+                color: 'var(--color-ink-muted)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border)',
+                cursor: 'pointer',
+              }}
+            >
+              Reset order
             </button>
           )}
         </div>
@@ -233,6 +280,18 @@ export function PageGrid({
               {insertCount} inserted
             </span>
           )}
+          {movedCount > 0 && (
+            <span
+              className="text-xs font-medium px-2.5 py-1"
+              style={{
+                background: 'oklch(55% 0.22 250 / 0.12)',
+                color: 'oklch(45% 0.22 250)',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            >
+              {movedCount} moved
+            </span>
+          )}
           <span
             className="text-xs font-medium px-2.5 py-1"
             style={{
@@ -252,6 +311,7 @@ export function PageGrid({
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
           gap: '16px',
+          paddingBottom: anySelected ? 72 : 0,
         }}
       >
         {items.map((item, idx) => {
@@ -276,6 +336,7 @@ export function PageGrid({
           }
           // kind === 'page'
           const pageNum = item.pageNum;
+          const isSelected = selectedPages.has(pageNum);
           return (
             <div key={item.key} style={{ position: 'relative' }}>
               <PageThumbnail
@@ -285,12 +346,45 @@ export function PageGrid({
                 replacement={replacements.get(pageNum) ?? null}
                 locked={locked}
                 isDeleted={deletions.has(pageNum)}
+                isSelected={isSelected}
+                anySelected={anySelected}
+                onToggleSelect={onToggleSelect}
                 onPageClick={onPageClick}
                 onReplace={onReplace}
                 onUndoReplace={onUndoReplace}
                 onDelete={onDelete}
                 onUndoDelete={onUndoDelete}
               />
+              {/* Selection checkbox */}
+              {!locked && !deletions.has(pageNum) && (
+                <div
+                  onClick={(e) => { e.stopPropagation(); onToggleSelect(pageNum); }}
+                  style={{
+                    position: 'absolute',
+                    top: -5,
+                    right: -5,
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    border: isSelected ? 'none' : '2px solid oklch(60% 0 0 / 0.4)',
+                    background: isSelected ? 'oklch(55% 0.22 250)' : 'oklch(100% 0 0 / 0.85)',
+                    cursor: 'pointer',
+                    zIndex: 25,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 1px 3px oklch(0% 0 0 / 0.15)',
+                    transition: 'transform 100ms, background 100ms',
+                  }}
+                  title={isSelected ? 'Deselect page' : 'Select page for moving'}
+                >
+                  {isSelected && (
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="2.5 6 5 8.5 9.5 3.5" />
+                    </svg>
+                  )}
+                </div>
+              )}
               {/* Left hover zone on first item (for inserting before page 1) */}
               {idx === 0 && (
                 <InsertHoverZone afterPage={0} side="left" locked={locked} onInsert={onInsert} />
@@ -301,6 +395,79 @@ export function PageGrid({
           );
         })}
       </div>
+
+      {/* Floating move bar */}
+      {anySelected && !locked && (
+        <div
+          style={{
+            position: 'sticky',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 12,
+            padding: '10px 16px',
+            background: 'var(--color-surface-card)',
+            borderTop: '1px solid var(--color-border)',
+            boxShadow: '0 -2px 8px oklch(0% 0 0 / 0.1)',
+            borderRadius: 'var(--radius-md) var(--radius-md) 0 0',
+            zIndex: 30,
+          }}
+        >
+          <span className="text-sm font-medium" style={{ color: 'var(--color-ink)' }}>
+            {selectedPages.size} {selectedPages.size === 1 ? 'page' : 'pages'} selected
+          </span>
+          <span className="text-sm" style={{ color: 'var(--color-ink-muted)' }}>
+            Move after page:
+          </span>
+          <input
+            type="text"
+            value={moveTarget}
+            onChange={(e) => setMoveTarget(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleMoveSubmit(); }}
+            placeholder="0"
+            className="focus-ring text-center text-sm font-medium"
+            style={{
+              width: 56,
+              padding: '4px 6px',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-surface-inset)',
+              color: 'var(--color-ink)',
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleMoveSubmit}
+            className="focus-ring text-xs font-medium px-3 py-1.5"
+            style={{
+              background: 'var(--color-primary)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+            }}
+          >
+            Move
+          </button>
+          <button
+            type="button"
+            onClick={onClearSelection}
+            className="focus-ring text-xs font-medium px-3 py-1.5"
+            style={{
+              background: 'var(--color-surface-inset)',
+              color: 'var(--color-ink-muted)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }

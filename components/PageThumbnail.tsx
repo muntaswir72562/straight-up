@@ -13,11 +13,14 @@ interface PageThumbnailProps {
   replacement: File | null;
   locked: boolean;
   isDeleted: boolean;
+  isSelected?: boolean;
+  anySelected?: boolean;
   onPageClick: (pageNumber: number) => void;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
   onDelete: (pageNumber: number) => void;
   onUndoDelete: (pageNumber: number) => void;
+  onToggleSelect?: (pageNumber: number) => void;
 }
 
 function isAcceptedFile(file: File): boolean {
@@ -38,11 +41,14 @@ export function PageThumbnail({
   replacement,
   locked,
   isDeleted,
+  isSelected = false,
+  anySelected = false,
   onPageClick,
   onReplace,
   onUndoReplace,
   onDelete,
   onUndoDelete,
+  onToggleSelect,
 }: PageThumbnailProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -212,6 +218,15 @@ export function PageThumbnail({
     [locked, onUndoDelete, pageNumber]
   );
 
+  const handleSelectClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (locked || !onToggleSelect) return;
+      onToggleSelect(pageNumber);
+    },
+    [locked, onToggleSelect, pageNumber]
+  );
+
   // Drag and drop
   const handleDragEnter = useCallback(
     (e: React.DragEvent) => {
@@ -274,11 +289,13 @@ export function PageThumbnail({
         background: isDragOver ? 'var(--color-drop-hover)' : 'var(--color-surface-inset)',
         border: isDragOver
           ? '2px solid var(--color-primary)'
-          : isDeleted
-            ? '2px solid var(--color-danger)'
-            : isReplaced
-              ? '2px solid var(--color-success)'
-              : '1px solid var(--color-border)',
+          : isSelected
+            ? '2px solid oklch(55% 0.22 250)'
+            : isDeleted
+              ? '2px solid var(--color-danger)'
+              : isReplaced
+                ? '2px solid var(--color-success)'
+                : '1px solid var(--color-border)',
         borderRadius: 'var(--radius-md)',
         opacity: effectiveOpacity,
         pointerEvents: locked ? 'none' : 'auto',

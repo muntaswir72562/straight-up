@@ -78,6 +78,8 @@ export function BookScanTool() {
   const [replacePdf, setReplacePdf] = useState<PDFDocumentProxy | null>(null);
   const [viewingPage, setViewingPage] = useState<number | null>(null);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const [pageOrder, setPageOrder] = useState<number[]>([]);
+  const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
 
   // --- Shared state ---
   const [status, setStatus] = useState<AppStatus>('idle');
@@ -108,9 +110,12 @@ export function BookScanTool() {
     (fullfixStraighten || fullfixClean || fullfixDewarp || fullfixV2 || fullfixOcr) &&
     status === 'idle';
 
+  const isDefaultOrder = pageOrder.length > 0 && pageOrder.every((pn, i) => pn === i + 1);
+  const hasPageOrderChange = pageOrder.length > 0 && !isDefaultOrder;
+
   const canStartReplace =
     replaceFile !== null &&
-    (replacements.size > 0 || deletions.size > 0 || insertions.length > 0) &&
+    (replacements.size > 0 || deletions.size > 0 || insertions.length > 0 || hasPageOrderChange) &&
     status === 'idle';
 
   const canStart =
@@ -447,6 +452,8 @@ export function BookScanTool() {
       setReplacements(new Map());
       setDeletions(new Set());
       setInsertions([]);
+      setPageOrder([]);
+      setSelectedPages(new Set());
 
       if (file === null) {
         setReplaceFile(null);
@@ -476,6 +483,7 @@ export function BookScanTool() {
         .then((result) => {
           if (result.valid) {
             setReplacePageCount(result.pageCount);
+            setPageOrder(Array.from({ length: result.pageCount }, (_, i) => i + 1));
             setReplaceIsValidating(false);
             // Load PDFDocumentProxy for thumbnail rendering
             loadPdfDocument(file).then((pdf) => {
@@ -544,6 +552,52 @@ export function BookScanTool() {
   const handleRemoveInsert = useCallback((id: string) => {
     setInsertions((prev) => prev.filter((ins) => ins.id !== id));
   }, []);
+
+  // --- Replace mode: Selection & Move ---
+  const handleToggleSelect = useCallback((pageNumber: number) => {
+    setSelectedPages((prev) => {
+      const next = new Set(prev);
+      if (next.has(pageNumber)) {
+        next.delete(pageNumber);
+      } else {
+        next.add(pageNumber);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleMoveTo = useCallback((afterPage: number) => {
+    setPageOrder((prev) => {
+      const selected = Array.from(selectedPages);
+      // Remove selected pages from current order
+      const remaining = prev.filter((pn) => !selectedPages.has(pn));
+      // Find insertion point: after the page number `afterPage` in the remaining list
+      let insertIdx: number;
+      if (afterPage === 0) {
+        insertIdx = 0;
+      } else {
+        const idx = remaining.indexOf(afterPage);
+        insertIdx = idx >= 0 ? idx + 1 : remaining.length;
+      }
+      // Preserve relative order of selected pages from original order
+      const selectedInOrder = prev.filter((pn) => selectedPages.has(pn));
+      const result = [...remaining];
+      result.splice(insertIdx, 0, ...selectedInOrder);
+      return result;
+    });
+    setSelectedPages(new Set());
+  }, [selectedPages]);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedPages(new Set());
+  }, []);
+
+  const handleResetOrder = useCallback(() => {
+    if (replacePageCount) {
+      setPageOrder(Array.from({ length: replacePageCount }, (_, i) => i + 1));
+    }
+    setSelectedPages(new Set());
+  }, [replacePageCount]);
 
   const handlePageClick = useCallback((pageNumber: number) => {
     setViewingPage(pageNumber);
@@ -665,7 +719,7 @@ export function BookScanTool() {
         result = await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = replaceFile!.name.replace(/\.pdf$/i, '');
-        result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, name, progressCb, cancelRef.current);
+        result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, pageOrder, name, progressCb, cancelRef.current);
       } else {
         // Full Book Fix: process queue sequentially
         const queue = fixFiles.length > 0
@@ -972,6 +1026,8 @@ export function BookScanTool() {
               deletions={deletions}
               insertions={insertions}
               locked={locked}
+              pageOrder={pageOrder}
+              selectedPages={selectedPages}
               onPageClick={handlePageClick}
               onReplace={handleReplace}
               onUndoReplace={handleUndoReplace}
@@ -980,6 +1036,10 @@ export function BookScanTool() {
               onInsert={handleInsert}
               onRemoveInsert={handleRemoveInsert}
               onOpenFullscreen={handleOpenFullscreen}
+              onToggleSelect={handleToggleSelect}
+              onMoveTo={handleMoveTo}
+              onClearSelection={handleClearSelection}
+              onResetOrder={handleResetOrder}
             />
           )}
         </section>
@@ -1558,6 +1618,8 @@ export function BookScanTool() {
         deletions={deletions}
         insertions={insertions}
         locked={locked}
+        pageOrder={pageOrder}
+        selectedPages={selectedPages}
         onClose={() => setFullscreenOpen(false)}
         onReplace={handleReplace}
         onUndoReplace={handleUndoReplace}
@@ -1565,6 +1627,9 @@ export function BookScanTool() {
         onUndoDelete={handleUndoDelete}
         onInsert={handleInsert}
         onRemoveInsert={handleRemoveInsert}
+        onToggleSelect={handleToggleSelect}
+        onMoveTo={handleMoveTo}
+        onClearSelection={handleClearSelection}
       />
     )}
     </>

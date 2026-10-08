@@ -262,6 +262,7 @@ export async function runReplacePipeline(
   replacements: Map<number, File>, // 1-based pageNumber → image File
   deletions: Set<number>,
   insertions: Insertion[],
+  pageOrder: number[], // 1-based page numbers in display/output order
   bookName: string,
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
@@ -358,9 +359,10 @@ export async function runReplacePipeline(
     }
   }
 
-  for (let i = 0; i < totalPages; i++) {
-    const pageNum = i + 1;
+  // Use pageOrder for output sequence (supports page reordering)
+  const orderedPages = pageOrder.length === totalPages ? pageOrder : Array.from({ length: totalPages }, (_, i) => i + 1);
 
+  for (const pageNum of orderedPages) {
     // Skip deleted pages
     if (!deletions.has(pageNum)) {
       outputIndex++;
@@ -378,7 +380,7 @@ export async function runReplacePipeline(
           fixPageIndices.push(outputIndex);
         }
       } else {
-        assemblePages.push({ kind: 'untouched', pdfIndex: 0, pageIndex: i });
+        assemblePages.push({ kind: 'untouched', pdfIndex: 0, pageIndex: pageNum - 1 });
       }
     }
 

@@ -24,6 +24,7 @@ function SidebarThumb({
   isActive,
   isReplaced,
   isDeleted,
+  isSelected,
   onClick,
 }: {
   pdf: PDFDocumentProxy;
@@ -31,6 +32,7 @@ function SidebarThumb({
   isActive: boolean;
   isReplaced: boolean;
   isDeleted: boolean;
+  isSelected: boolean;
   onClick: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -79,7 +81,7 @@ function SidebarThumb({
         borderRadius: 'var(--radius-sm)',
         overflow: 'hidden',
         cursor: 'pointer',
-        border: isActive ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
+        border: isActive ? '2px solid var(--color-primary)' : isSelected ? '2px solid oklch(55% 0.22 250)' : '1px solid var(--color-border)',
         opacity: isDeleted ? 0.35 : 1,
         position: 'relative',
         flexShrink: 0,
@@ -102,6 +104,12 @@ function SidebarThumb({
           borderRadius: '50%', background: 'var(--color-success)',
         }} />
       )}
+      {isSelected && (
+        <span style={{
+          position: 'absolute', top: 1, left: 1, width: 6, height: 6,
+          borderRadius: '50%', background: 'oklch(55% 0.22 250)',
+        }} />
+      )}
     </div>
   );
 }
@@ -115,6 +123,7 @@ function FullscreenPage({
   replacement,
   isDeleted,
   isReplaced,
+  isSelected,
   locked,
   onReplace,
   onUndoReplace,
@@ -122,6 +131,7 @@ function FullscreenPage({
   onUndoDelete,
   onInsert,
   onStartInpaint,
+  onToggleSelect,
   onObserve,
   renderWidth,
 }: {
@@ -131,6 +141,7 @@ function FullscreenPage({
   replacement: File | null;
   isDeleted: boolean;
   isReplaced: boolean;
+  isSelected: boolean;
   locked: boolean;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
@@ -138,6 +149,7 @@ function FullscreenPage({
   onUndoDelete: (pageNumber: number) => void;
   onInsert: (afterPage: number, file: File) => void;
   onStartInpaint: (pageNumber: number) => void;
+  onToggleSelect: (pageNumber: number) => void;
   onObserve: (pageNumber: number, ratio: number) => void;
   renderWidth: number;
 }) {
@@ -234,7 +246,7 @@ function FullscreenPage({
         borderRadius: 'var(--radius-md)',
         overflow: 'hidden',
         boxShadow: 'var(--shadow-md)',
-        border: isReplaced ? '2px solid var(--color-success)' : isDeleted ? '2px solid var(--color-danger)' : '1px solid var(--color-border)',
+        border: isSelected ? '2px solid oklch(55% 0.22 250)' : isReplaced ? '2px solid var(--color-success)' : isDeleted ? '2px solid var(--color-danger)' : '1px solid var(--color-border)',
         maxWidth: renderWidth,
         width: '100%',
       }}>
@@ -335,6 +347,11 @@ function FullscreenPage({
                 label="Remove Artifact"
                 icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.5 5.5a5 5 0 0 1-9 3M1.5 6.5a5 5 0 0 1 9-3" /><circle cx="6" cy="6" r="1.5" /></svg>}
                 onClick={() => onStartInpaint(pageNumber)}
+              />
+              <ActionBtn
+                label={isSelected ? 'Deselect' : 'Select'}
+                icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">{isSelected ? <polyline points="2.5 6 5 8.5 9.5 3.5" /> : <rect x="1.5" y="1.5" width="9" height="9" rx="1.5" />}</svg>}
+                onClick={() => onToggleSelect(pageNumber)}
               />
             </>
           )}
@@ -472,6 +489,8 @@ interface FullscreenViewerProps {
   deletions: Set<number>;
   insertions: Insertion[];
   locked: boolean;
+  pageOrder: number[];
+  selectedPages: Set<number>;
   initialPage?: number;
   onClose: () => void;
   onReplace: (pageNumber: number, file: File) => void;
@@ -480,6 +499,9 @@ interface FullscreenViewerProps {
   onUndoDelete: (pageNumber: number) => void;
   onInsert: (afterPage: number, file: File) => void;
   onRemoveInsert: (id: string) => void;
+  onToggleSelect: (pageNumber: number) => void;
+  onMoveTo: (afterPage: number) => void;
+  onClearSelection: () => void;
 }
 
 export function FullscreenViewer({
@@ -489,6 +511,8 @@ export function FullscreenViewer({
   deletions,
   insertions,
   locked,
+  pageOrder,
+  selectedPages,
   initialPage = 1,
   onClose,
   onReplace,
@@ -497,12 +521,17 @@ export function FullscreenViewer({
   onUndoDelete,
   onInsert,
   onRemoveInsert,
+  onToggleSelect,
+  onMoveTo,
+  onClearSelection,
 }: FullscreenViewerProps) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [currentPage, setCurrentPage] = useState(initialPage);
   const [pageInput, setPageInput] = useState(String(initialPage));
   const visibilityRef = useRef<Map<number, number>>(new Map());
   const [zoom, setZoom] = useState(1.0);
+  const [moveTarget, setMoveTarget] = useState('');
+  const anySelected = selectedPages.size > 0;
   const pageWidth = Math.round(FULLSCREEN_RENDER_WIDTH * zoom);
 
   // Inpaint state
@@ -644,21 +673,33 @@ export function FullscreenViewer({
     }
   }, [inpaintPage, onReplace, handleCancelInpaint]);
 
-  // Build flat list (same as PageGrid)
+  // Build flat list (same as PageGrid), respecting pageOrder
   type ViewItem =
     | { kind: 'page'; pageNum: number }
     | { kind: 'inserted'; insertion: Insertion };
+
+  const orderedPages = pageOrder.length === totalPages
+    ? pageOrder
+    : Array.from({ length: totalPages }, (_, i) => i + 1);
 
   const items: ViewItem[] = [];
   for (const ins of insertions.filter((i) => i.afterPage === 0)) {
     items.push({ kind: 'inserted', insertion: ins });
   }
-  for (let i = 1; i <= totalPages; i++) {
-    items.push({ kind: 'page', pageNum: i });
-    for (const ins of insertions.filter((ins) => ins.afterPage === i)) {
+  for (const pageNum of orderedPages) {
+    items.push({ kind: 'page', pageNum });
+    for (const ins of insertions.filter((ins) => ins.afterPage === pageNum)) {
       items.push({ kind: 'inserted', insertion: ins });
     }
   }
+
+  const handleMoveSubmit = () => {
+    const val = parseInt(moveTarget, 10);
+    if (!isNaN(val) && val >= 0 && val <= totalPages) {
+      onMoveTo(val);
+      setMoveTarget('');
+    }
+  };
 
   return (
     <div style={{
@@ -767,7 +808,7 @@ export function FullscreenViewer({
           display: 'flex', flexDirection: 'column', gap: 6,
           background: 'var(--color-surface-card)',
         }}>
-          {Array.from({ length: totalPages }, (_, i) => i + 1).map((pn) => (
+          {orderedPages.map((pn) => (
             <SidebarThumb
               key={pn}
               pdf={pdf}
@@ -775,6 +816,7 @@ export function FullscreenViewer({
               isActive={pn === currentPage}
               isReplaced={replacements.has(pn)}
               isDeleted={deletions.has(pn)}
+              isSelected={selectedPages.has(pn)}
               onClick={() => jumpToPage(pn)}
             />
           ))}
@@ -814,6 +856,7 @@ export function FullscreenViewer({
                 replacement={replacements.get(pn) ?? null}
                 isDeleted={deletions.has(pn)}
                 isReplaced={replacements.has(pn)}
+                isSelected={selectedPages.has(pn)}
                 locked={locked}
                 onReplace={onReplace}
                 onUndoReplace={onUndoReplace}
@@ -821,6 +864,7 @@ export function FullscreenViewer({
                 onUndoDelete={onUndoDelete}
                 onInsert={onInsert}
                 onStartInpaint={handleStartInpaint}
+                onToggleSelect={onToggleSelect}
                 onObserve={handleObserve}
                 renderWidth={pageWidth}
               />
@@ -828,6 +872,78 @@ export function FullscreenViewer({
           })}
         </div>
       </div>
+
+      {/* Floating move bar */}
+      {anySelected && !locked && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 12,
+            padding: '10px 16px',
+            background: 'var(--color-surface-card)',
+            borderTop: '1px solid var(--color-border)',
+            boxShadow: '0 -2px 8px oklch(0% 0 0 / 0.1)',
+            zIndex: 50,
+          }}
+        >
+          <span className="text-sm font-medium" style={{ color: 'var(--color-ink)' }}>
+            {selectedPages.size} {selectedPages.size === 1 ? 'page' : 'pages'} selected
+          </span>
+          <span className="text-sm" style={{ color: 'var(--color-ink-muted)' }}>
+            Move after page:
+          </span>
+          <input
+            type="text"
+            value={moveTarget}
+            onChange={(e) => setMoveTarget(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleMoveSubmit(); }}
+            placeholder="0"
+            className="focus-ring text-center text-sm font-medium"
+            style={{
+              width: 56,
+              padding: '4px 6px',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-surface-inset)',
+              color: 'var(--color-ink)',
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleMoveSubmit}
+            className="focus-ring text-xs font-medium px-3 py-1.5"
+            style={{
+              background: 'var(--color-primary)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+            }}
+          >
+            Move
+          </button>
+          <button
+            type="button"
+            onClick={onClearSelection}
+            className="focus-ring text-xs font-medium px-3 py-1.5"
+            style={{
+              background: 'var(--color-surface-inset)',
+              color: 'var(--color-ink-muted)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Inpaint overlay */}
       {inpaintPage !== null && inpaintImageUrl && (
