@@ -94,7 +94,7 @@ export async function renderThumbnail(
   //    Falls back to null for non-JPEG pages.
   let promise = inflight.get(key);
   if (!promise) {
-    promise = extractPageThumb(pageNumber, maxWidth)
+    promise = extractPageThumb(fp, pageNumber, maxWidth)
       .then((blob) => blob ?? renderToBlob(pdf, pageNumber, maxWidth));
     inflight.set(key, promise);
     promise

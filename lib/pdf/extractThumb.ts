@@ -3,22 +3,28 @@ import { PDFDocument, PDFName, PDFDict, PDFRawStream, PDFArray } from 'pdf-lib';
 // ── Module-level cache ──────────────────────────────────────────────
 // Keeps the parsed pdf-lib document so we only parse once per file.
 let cachedDoc: PDFDocument | null = null;
+let cachedFingerprint: string | null = null;
 
 /**
  * Parse a PDF with pdf-lib for fast JPEG extraction.
  * Call once after the file is validated; subsequent `extractPageThumb`
  * calls reuse the parsed document.
+ *
+ * @param fingerprint  The pdfjs fingerprint so extraction is only
+ *                     attempted for the matching document.
  */
-export async function loadForExtraction(bytes: Uint8Array): Promise<void> {
+export async function loadForExtraction(bytes: Uint8Array, fingerprint: string): Promise<void> {
   cachedDoc = await PDFDocument.load(bytes, {
     ignoreEncryption: true,
     updateMetadata: false,
   });
+  cachedFingerprint = fingerprint;
 }
 
 /** Release the cached pdf-lib document. */
 export function clearExtraction(): void {
   cachedDoc = null;
+  cachedFingerprint = null;
 }
 
 /**
@@ -30,10 +36,11 @@ export function clearExtraction(): void {
  * doesn't contain a simple embedded JPEG (falls back to pdfjs).
  */
 export async function extractPageThumb(
+  fingerprint: string,
   pageNumber: number,
   maxWidth: number,
 ): Promise<Blob | null> {
-  if (!cachedDoc) return null;
+  if (!cachedDoc || cachedFingerprint !== fingerprint) return null;
 
   try {
     const page = cachedDoc.getPage(pageNumber - 1);

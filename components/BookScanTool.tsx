@@ -491,13 +491,13 @@ export function BookScanTool() {
             setReplacePageCount(result.pageCount);
             setPageOrder(Array.from({ length: result.pageCount }, (_, i) => i + 1));
             setReplaceIsValidating(false);
-            // Load pdf-lib document for fast JPEG extraction (thumbnails)
-            file.arrayBuffer().then((ab) =>
-              loadForExtraction(new Uint8Array(ab))
-            ).catch(() => { /* extraction is optional, pdfjs fallback works */ });
-            // Load PDFDocumentProxy for thumbnail rendering
+            // Load PDFDocumentProxy for thumbnail rendering, then pdf-lib for fast JPEG extraction
             loadPdfDocument(file).then((pdf) => {
               setReplacePdf(pdf);
+              // Load pdf-lib extraction using pdfjs fingerprint for identity gating
+              file.arrayBuffer().then((ab) =>
+                loadForExtraction(new Uint8Array(ab), pdf.fingerprints[0] ?? '')
+              ).catch(() => { /* extraction is optional, pdfjs fallback works */ });
             }).catch(() => {
               setReplaceError("Failed to load PDF for preview.");
             });
