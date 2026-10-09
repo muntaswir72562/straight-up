@@ -52,7 +52,8 @@ export function LassoCanvas({
 
     const cw = container.clientWidth;
     const ch = container.clientHeight;
-    const scale = Math.min(cw / imageWidth, ch / imageHeight, 1);
+    // Reserve horizontal padding and vertical space for the bottom button bar
+    const scale = Math.min((cw - 32) / imageWidth, (ch - 80) / imageHeight, 1);
     setDisplayScale(scale);
 
     const dw = Math.round(imageWidth * scale);

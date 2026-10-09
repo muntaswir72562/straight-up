@@ -234,7 +234,7 @@ function FullscreenPage({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        padding: '24px 0',
+        padding: '12px 0',
         opacity: isDeleted ? 0.35 : 1,
         transition: 'opacity var(--duration-fast)',
       }}
@@ -299,7 +299,7 @@ function FullscreenPage({
 
       {/* Action buttons */}
       {!locked && (
-        <div className="flex items-center gap-2 mt-3 flex-wrap justify-center">
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap justify-center">
           <input
             ref={fileInputRef}
             type="file"
@@ -532,7 +532,7 @@ export function FullscreenViewer({
   const [zoom, setZoom] = useState(1.0);
   const [moveTarget, setMoveTarget] = useState('');
   const anySelected = selectedPages.size > 0;
-  const pageWidth = Math.round(FULLSCREEN_RENDER_WIDTH * zoom);
+  const pageWidth = Math.round((FULLSCREEN_RENDER_WIDTH / 2) * zoom);
 
   // Inpaint state
   const [inpaintPage, setInpaintPage] = useState<number | null>(null);
@@ -829,11 +829,17 @@ export function FullscreenViewer({
             flex: 1,
             overflowY: 'auto',
             padding: '0 24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
           }}
         >
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, 1fr)',
+              gap: '8px 16px',
+              maxWidth: pageWidth * 2 + 48,
+              margin: '0 auto',
+            }}
+          >
           {items.map((item) => {
             if (item.kind === 'inserted') {
               return (
@@ -870,6 +876,7 @@ export function FullscreenViewer({
               />
             );
           })}
+          </div>
         </div>
       </div>
 
