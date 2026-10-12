@@ -174,6 +174,31 @@ def _fix_worker(args):
 
 # ── Searchable PDF overlay ───────────────────────────────────────────
 
+def _strip_old_text_layer(page):
+    """Remove an existing invisible (OCR) text layer from a page before the
+    new OCR text is written, so a book that already had OCR doesn't end up
+    with every word twice. Only pages whose text is ALL invisible are
+    touched; pages with visible text are left as they are. Images and
+    drawings are kept."""
+    try:
+        spans = page.get_texttrace()
+    except Exception:
+        return False
+    if not spans or any(s.get('type') != 3 for s in spans):
+        return False
+    try:
+        page.add_redact_annot(page.rect, fill=False)
+        try:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=getattr(fitz, 'PDF_REDACT_LINE_ART_NONE', 0))
+        except TypeError:
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        return True
+    except Exception:
+        return False
+
+
 def _build_searchable_pdf(output_path, ocr_results, ocr_page_set):
     """Overlay invisible OCR text on specific pages of the output PDF."""
     doc = fitz.open(output_path)
@@ -200,6 +225,7 @@ def _build_searchable_pdf(output_path, ocr_results, ocr_page_set):
         sx = pw / iw  # pixel → points scale
         sy = ph / ih
 
+        _strip_old_text_layer(page)
         tw = fitz.TextWriter(page.rect)
 
         for block in page_data.get('blocks', []):

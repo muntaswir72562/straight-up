@@ -95,7 +95,11 @@ def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=120):
 def _parse_tsv(tsv_text):
     """Parse Tesseract TSV output into a list of row dicts."""
     rows = []
-    reader = csv.DictReader(io.StringIO(tsv_text), delimiter='\t')
+    # QUOTE_NONE: a word that starts with a straight double quote (") must
+    # not open a CSV quoted field -- that swallowed every following row up
+    # to the next quote, so whole passages of a page lost their words.
+    reader = csv.DictReader(io.StringIO(tsv_text), delimiter='\t',
+                            quoting=csv.QUOTE_NONE)
     for row in reader:
         try:
             rows.append({

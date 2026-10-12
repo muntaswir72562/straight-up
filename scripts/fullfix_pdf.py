@@ -459,6 +459,31 @@ def run_ocr_phase(input_path, progress_file, total, do_v2, do_straighten,
 
 # ── Searchable PDF + sidecar ─────────────────────────────────────────
 
+def _strip_old_text_layer(page):
+    """Remove an existing invisible (OCR) text layer from a page before the
+    new OCR text is written, so a book that already had OCR doesn't end up
+    with every word twice. Only pages whose text is ALL invisible are
+    touched; pages with visible text are left as they are. Images and
+    drawings are kept."""
+    try:
+        spans = page.get_texttrace()
+    except Exception:
+        return False
+    if not spans or any(s.get('type') != 3 for s in spans):
+        return False
+    try:
+        page.add_redact_annot(page.rect, fill=False)
+        try:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=getattr(fitz, 'PDF_REDACT_LINE_ART_NONE', 0))
+        except TypeError:
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        return True
+    except Exception:
+        return False
+
+
 def _build_searchable_pdf(output_path, ocr_json_path):
     """Overlay invisible OCR text on the output PDF to make it searchable."""
     with open(ocr_json_path, 'r', encoding='utf-8') as f:
@@ -485,6 +510,7 @@ def _build_searchable_pdf(output_path, ocr_json_path):
         sx = pw / iw  # pixel → points scale
         sy = ph / ih
 
+        _strip_old_text_layer(page)
         tw = fitz.TextWriter(page.rect)
 
         for block in page_data.get('blocks', []):

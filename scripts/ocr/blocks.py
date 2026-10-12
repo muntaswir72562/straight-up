@@ -37,6 +37,16 @@ def build_blocks(words, lines_info, table_cells, page_h, page_w):
 
     # Group OCR words into Tesseract's block → paragraph → line hierarchy
     tess_lines = _group_into_lines(words)
+    if table_bbox and blocks[0].get('lines'):
+        # the table's own (per-cell) words cover everything inside it: drop
+        # full-page lines whose centre lies inside the table, so no text is
+        # embedded twice
+        tx, ty, tw_, th_ = table_bbox
+        def _inside(l):
+            x, y, w, h = l['bbox']
+            cx, cy = x + w / 2.0, y + h / 2.0
+            return tx <= cx <= tx + tw_ and ty <= cy <= ty + th_
+        tess_lines = [l for l in tess_lines if not _inside(l)]
 
     # Body region from the scanner's text-line analysis
     body_y0, body_y1 = _body_region(lines_info, page_h, page_w)
@@ -228,7 +238,14 @@ def _parse_contents(lines):
 # ── Table block ─────────────────────────────────────────────────────
 
 def _build_table_block(table_cells, page_h, page_w):
-    """Build a table block from per-cell OCR results."""
+    """Build a table block from per-cell OCR results.
+
+    table_cells: (row, col, text, cell_bbox[, words]) per cell. The words
+    (with page-pixel bboxes) become the block's lines, so the text inside
+    tables is embedded in the searchable PDF like any other text. Without
+    them a page laid out as a table (labels on the left, text on the right)
+    got no searchable text at all.
+    """
     if not table_cells:
         return {
             'type': 'table', 'text': '', 'bbox': [0, 0, 0, 0],
@@ -238,8 +255,13 @@ def _build_table_block(table_cells, page_h, page_w):
     max_row = max(c[0] for c in table_cells) + 1
     max_col = max(c[1] for c in table_cells) + 1
     rows = [[''] * max_col for _ in range(max_row)]
-    for row_idx, col_idx, text, _bbox in table_cells:
+    lines = []
+    for cell in sorted(table_cells, key=lambda c: (c[0], c[1])):
+        row_idx, col_idx, text, _bbox = cell[:4]
         rows[row_idx][col_idx] = text
+        cell_words = cell[4] if len(cell) > 4 else []
+        if cell_words:
+            lines.extend(_group_into_lines(cell_words))
 
     all_bboxes = [c[3] for c in table_cells if c[3]]
     if all_bboxes:
@@ -254,7 +276,7 @@ def _build_table_block(table_cells, page_h, page_w):
     text = '\n'.join('\t'.join(row) for row in rows)
     return {
         'type': 'table', 'text': text, 'bbox': bbox,
-        'table': {'rows': rows}, 'lines': [],
+        'table': {'rows': rows}, 'lines': lines,
     }
 
 

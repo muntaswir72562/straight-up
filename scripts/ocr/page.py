@@ -10,6 +10,7 @@ Orchestrates:
   6. Apply post-corrections
   7. Assemble page result dict
 """
+import re
 import sys
 
 import cv2
@@ -232,36 +233,64 @@ def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi):
 
     cells = []
     uh, uw = upscaled.shape[:2]
-    pad = max(3, int(4 * scale))
+    # Crop just INSIDE the grid lines (the old crop reached outside them, so
+    # the cell borders were read as "|", "_" and junk), and give Tesseract a
+    # white margin to work with instead.
+    inset = max(3, int(round(4 * scale)))
+    margin = max(8, int(round(10 * scale)))
 
     for ri in range(len(h_lines) - 1):
         for ci in range(len(v_lines) - 1):
             y0, y1 = h_lines[ri], h_lines[ri + 1]
             x0, x1 = v_lines[ci], v_lines[ci + 1]
+            cell_bbox = [x0, y0, x1 - x0, y1 - y0]
             if y1 - y0 < 5 or x1 - x0 < 5:
-                cells.append((ri, ci, '', [x0, y0, x1 - x0, y1 - y0]))
+                cells.append((ri, ci, '', cell_bbox, []))
                 continue
 
             # Crop in upscaled coordinates
-            sx0 = max(0, int(x0 * scale) - pad)
-            sy0 = max(0, int(y0 * scale) - pad)
-            sx1 = min(uw, int(x1 * scale) + pad)
-            sy1 = min(uh, int(y1 * scale) + pad)
+            sx0 = max(0, int(x0 * scale) + inset)
+            sy0 = max(0, int(y0 * scale) + inset)
+            sx1 = min(uw, int(x1 * scale) - inset)
+            sy1 = min(uh, int(y1 * scale) - inset)
+            if sx1 - sx0 < 5 or sy1 - sy0 < 5:
+                cells.append((ri, ci, '', cell_bbox, []))
+                continue
             crop = upscaled[sy0:sy1, sx0:sx1]
 
-            if crop.size < 100:
-                cells.append((ri, ci, '', [x0, y0, x1 - x0, y1 - y0]))
+            if crop.size < 100 or crop.min() > 200:
+                # tiny or blank cell
+                cells.append((ri, ci, '', cell_bbox, []))
                 continue
+            crop = cv2.copyMakeBorder(crop, margin, margin, margin, margin,
+                                      cv2.BORDER_CONSTANT, value=255)
 
+            words = []
             try:
                 tsv = run_tesseract(crop, lang=lang, psm=6, dpi=dpi,
                                      timeout=30)
                 cw = extract_words(tsv, scale=1.0)
-                text = ' '.join(w['text'] for w in cw).strip()
+                for w in cw:
+                    t = w['text'].strip()
+                    # leftovers of the cell border and specks
+                    if not t or re.fullmatch(r"[|_\-\u2014\u2013=~'\u2018\u2019\".,:;]+", t):
+                        continue
+                    if w['conf'] < 30 and len(t) <= 2:
+                        continue
+                    bx, by, bw, bh = w['bbox']
+                    # crop (upscaled, with margin) -> original page pixels
+                    w = dict(w)
+                    w['text'] = t
+                    w['bbox'] = [int((sx0 - margin + bx) / scale),
+                                 int((sy0 - margin + by) / scale),
+                                 max(1, int(bw / scale)), max(1, int(bh / scale))]
+                    words.append(w)
+                text = ' '.join(w['text'] for w in words).strip()
             except Exception:
                 text = ''
+                words = []
 
-            cells.append((ri, ci, text, [x0, y0, x1 - x0, y1 - y0]))
+            cells.append((ri, ci, text, cell_bbox, words))
 
     return cells
 
