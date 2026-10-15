@@ -1,14 +1,14 @@
 import { sanitizeBookName } from './filename';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
 
-/** Upload chunk size — 400 MB */
-const CHUNK_SIZE = 400 * 1024 * 1024;
+/** Upload chunk size — 100 MB */
+const CHUNK_SIZE = 100 * 1024 * 1024;
 
 /**
  * Full Book Fix pipeline — server-side via Python.
  *
  * 1. Creates a job on the server
- * 2. Uploads the PDF in ~200 MB chunks (File.slice — zero client memory overhead)
+ * 2. Uploads the PDF in 100 MB chunks (File.slice — zero client memory overhead)
  * 3. Starts processing on the server
  * 4. Polls /api/fullfix?id=… for page-by-page progress
  * 5. Downloads the result from /api/fullfix/download?id=…

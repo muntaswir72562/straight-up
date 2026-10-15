@@ -27,6 +27,7 @@ from page_audit import (
     _text_ngrams,
     _image_correlation,
     is_blank_page,
+    detect_issues_sparse,
 )
 
 
@@ -407,6 +408,60 @@ class TestAlternatingLayout(unittest.TestCase):
         """Numbers alternating left/right by parity → read correctly."""
         _, issues = _run_full_pipeline(list(range(1, 51)), alternating=True)
         self.assertEqual(len(issues), 0)
+
+
+class TestShortFile(unittest.TestCase):
+    """A 2-page excerpt: printed 119 and 133 (13 pages missing between).
+    Footnote numbers sit nearer the bottom edge than the header number sits
+    to the top edge; the header number stands alone on its line."""
+
+    def _page(self, num, footnote):
+        words = [
+            _make_word('Procedural', 300, 40, 80), _make_word('Aspects', 385, 40, 60),
+            _make_word(str(num), 740, 40, 25),            # running head, far right
+            _make_word(str(footnote), 50, 975, 18),        # footnote number ...
+            _make_word('Paragraph', 72, 975, 70),          # ... followed by text
+        ]
+        return extract_candidates(words, 800, 1000)
+
+    def test_header_number_beats_footnote(self):
+        cands = [self._page(119, 88), self._page(133, 37)]
+        layout = learn_layout(cands)
+        picked = pick_page_numbers(cands, layout)
+        self.assertEqual([p['value'] for p in picked], [119, 133])
+
+    def test_gap_reported(self):
+        cands = [self._page(119, 88), self._page(133, 37)]
+        picked = pick_page_numbers(cands, learn_layout(cands))
+        run = build_runs(picked)[0]
+        run_pages, smoothed = analyse_run(run)
+        self.assertTrue(all(o is None for o in smoothed))
+        issues, rng = detect_issues_sparse(run_pages, run['kind'], run['from_scan'])
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['type'], 'missing')
+        self.assertEqual(issues[0]['printed'][0], '120')
+        self.assertEqual(issues[0]['printed'][-1], '132')
+        self.assertEqual(rng, (119, 133))
+
+    def test_consecutive_no_issue(self):
+        cands = [self._page(119, 88), self._page(120, 89), self._page(121, 90)]
+        picked = pick_page_numbers(cands, learn_layout(cands))
+        run = build_runs(picked)[0]
+        run_pages, _ = analyse_run(run)
+        issues, rng = detect_issues_sparse(run_pages, run['kind'], run['from_scan'])
+        self.assertEqual(issues, [])
+        self.assertEqual(rng, (119, 121))
+
+    def test_untrusted_footnotes_never_reported(self):
+        # only footnote-like numbers (word right next to them): no finding
+        words1 = [_make_word('5', 50, 975, 10), _make_word('Ibid', 64, 975, 40)]
+        words2 = [_make_word('40', 50, 975, 18), _make_word('Ibid', 72, 975, 40)]
+        cands = [extract_candidates(words1, 800, 1000), extract_candidates(words2, 800, 1000)]
+        picked = pick_page_numbers(cands, learn_layout(cands))
+        run = build_runs(picked)[0]
+        run_pages, _ = analyse_run(run)
+        issues, _ = detect_issues_sparse(run_pages, run['kind'], run['from_scan'])
+        self.assertEqual(issues, [])
 
 
 # ── Entry point ──────────────────────────────────────────────────────

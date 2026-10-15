@@ -9,8 +9,8 @@ function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
 }
 
-/** Upload chunk size — 400 MB */
-const CHUNK_SIZE = 400 * 1024 * 1024;
+/** Upload chunk size — 100 MB */
+const CHUNK_SIZE = 100 * 1024 * 1024;
 
 /**
  * Convert an image File (JPEG, PNG, WebP) to JPEG bytes via canvas.

@@ -39,6 +39,7 @@ BAND_FRACTION = 0.12        # top/bottom 12 % of page
 THUMB_W, THUMB_H = 64, 96   # thumbnail size for image similarity
 THUMB_DPI = 40               # render DPI for thumbnails
 OCR_DPI = 150                # render DPI for OCR-less path
+OCR_RETRY_DPI = 200          # a page with no clear stand-alone number is read again at this DPI
 MIN_INK_FRACTION = 0.003     # below this a page is blank
 CORR_THRESHOLD = 0.85        # image correlation threshold for duplicates
 TEXT_OVERLAP_THRESHOLD = 0.50 # 3-gram overlap threshold for text duplicates
@@ -48,6 +49,8 @@ MIN_VOTES = 4                # minimum votes for sliding mode
 MIN_CONSISTENT_PAIRS = 5     # minimum for a slot to be accepted
 CONTEXT_PAGES = 3            # pages on each side to confirm a finding
 MAX_PAGE_VALUE = 3000        # reject page numbers above this
+ALONE_GAP = 3.0              # a number with no word within this many of its own heights on its line stands alone
+SPARSE_MIN_CONF = 60         # short files: OCR confidence a reading needs to be trusted
 
 # Blur detection
 BLUR_DPI = 200               # render DPI for blur analysis (about the photos' own resolution)
@@ -133,6 +136,32 @@ def _is_junk_token(raw: str, all_words_in_line: list[str] | None = None) -> bool
     return False
 
 
+def _stands_alone(bbox, words) -> bool:
+    """True if no other word sits on the same line within ALONE_GAP times the
+    word's height. A page number stands alone (centred, or set apart from the
+    running head); a footnote number or a number inside a sentence has a word
+    right next to it."""
+    x, y, w, h = bbox
+    cy = y + h / 2.0
+    for o in words:
+        if not o.get('text', '').strip():
+            continue
+        ox, oy, ow, oh = o['bbox']
+        if [ox, oy, ow, oh] == [x, y, w, h]:
+            continue
+        if abs((oy + oh / 2.0) - cy) > 0.6 * max(h, oh, 1):
+            continue
+        if ox >= x + w:
+            d = ox - (x + w)
+        elif ox + ow <= x:
+            d = x - (ox + ow)
+        else:
+            d = 0
+        if d < ALONE_GAP * max(h, 1):
+            return False
+    return True
+
+
 def extract_candidates(words: list[dict], page_width: int, page_height: int) -> list[dict]:
     """
     Extract page-number candidates from words in the top/bottom bands.
@@ -188,6 +217,7 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
             continue
 
         conf = word.get('conf', 0)
+        alone = _stands_alone(word['bbox'], words)
 
         # Try arabic
         fixed = _fix_ocr_digits(cleaned)
@@ -204,6 +234,7 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
                     'text': raw,
                     'weight': 1.0,
                     'edge': edge,
+                    'alone': alone,
                 })
 
         # Try roman
@@ -223,6 +254,7 @@ def extract_candidates(words: list[dict], page_width: int, page_height: int) -> 
                 'text': raw,
                 'weight': weight,
                 'edge': edge,
+                'alone': alone,
             })
 
     return candidates
@@ -313,19 +345,28 @@ def pick_page_numbers(candidates_per_page: list[list[dict]], layout: dict) -> li
         parity = 'odd' if scan_page % 2 == 1 else 'even'
         winning = layout.get(parity)
         pool = cands
+        guided = False
         if winning is not None and not layout.get('fallback'):
             slot, kind = winning
             matching = [c for c in cands if c['slot'] == slot and c['kind'] == kind]
             if matching:
                 pool = matching
-        pools.append(pool)
+                guided = True
+        pools.append((pool, guided))
 
-    def first_guess(pool):
+    def first_guess(pool, guided):
         if not pool:
             return None
+        if not guided:
+            # no learned slot (a short file, or this page's slot is empty):
+            # a number standing alone beats a footnote number or a number
+            # inside a sentence that happens to sit nearer the edge
+            return sorted(pool, key=lambda c: (-c['weight'], not c.get('alone', False),
+                                               c.get('edge', 0.0), -c['conf']))[0]
         return sorted(pool, key=lambda c: (-c['weight'], c.get('edge', 0.0), -c['conf']))[0]
 
-    guess = [first_guess(p) for p in pools]
+    guess = [first_guess(p, g) for p, g in pools]
+    pools = [p for p, _ in pools]
     offs = [(g['value'] - i) if g is not None else None for i, g in enumerate(guess)]
 
     result = []
@@ -735,6 +776,57 @@ def detect_issues(run_pages: list[dict], smoothed: list[int | None],
     return issues
 
 
+def detect_issues_sparse(run_pages: list[dict], run_kind: str, run_from: int):
+    """Short files (a chapter, a few pages): too few pages for the sliding
+    mode to learn the numbering, so detect_issues finds nothing. Compare the
+    trusted readings directly instead: numbers that stand alone on their line
+    (not a footnote number or a number in a sentence) and were read clearly.
+    Returns (issues, (lowest, highest) trusted value or None)."""
+    trusted = [(k, p['value']) for k, p in enumerate(run_pages)
+               if p.get('source') == 'read' and p.get('value') is not None
+               and p.get('alone') and p.get('conf', 0) >= SPARSE_MIN_CONF]
+    if len(trusted) < 2:
+        return [], None
+    fmt = (lambda v: int_to_roman(v)) if run_kind == 'roman' else str
+    issues = []
+    ok_vals = []
+    for (i, vi), (j, vj) in zip(trusted, trusted[1:]):
+        step = j - i
+        if vj <= vi - 1 or vj - vi > 50 * step:
+            continue   # not one sequence (a misread, another numbering)
+        ok_vals += [vi, vj]
+        a, b = run_from + i, run_from + j
+        if vj - vi > step:
+            n_missing = vj - vi - step
+            if step == 1:
+                printed = [fmt(v) for v in range(vi + 1, vj)]
+                if len(printed) == 1:
+                    msg = f"Page {printed[0]} missing (between scan pages {a} and {b})"
+                else:
+                    msg = (f"Pages {printed[0]}\u2013{printed[-1]} missing "
+                           f"(between scan pages {a} and {b})")
+            else:
+                printed = []
+                msg = (f"{n_missing} page(s) missing between page {fmt(vi)} "
+                       f"(scan page {a}) and page {fmt(vj)} (scan page {b})")
+            issues.append({'type': 'missing', 'confidence': 'high',
+                           'printed': printed, 'after_scan': a,
+                           'before_scan': b, 'message': msg})
+        elif vj - vi < step:
+            if step == 1 and vj == vi:
+                issues.append({'type': 'duplicate', 'confidence': 'low',
+                               'printed': [fmt(vi)], 'after_scan': a,
+                               'before_scan': b,
+                               'message': f"Page {fmt(vi)} appears on both scan pages {a} and {b}"})
+            else:
+                issues.append({'type': 'duplicate', 'confidence': 'low',
+                               'printed': [], 'after_scan': a, 'before_scan': b,
+                               'message': (f"Possible duplicate between page {fmt(vi)} "
+                                           f"(scan page {a}) and page {fmt(vj)} (scan page {b})")})
+    rng = (min(ok_vals), max(ok_vals)) if ok_vals else None
+    return issues, rng
+
+
 # ── Step E: content checks (duplicates only) ─────────────────────────
 
 def _text_ngrams(text: str, n: int = 3) -> set[tuple[str, ...]]:
@@ -932,39 +1024,80 @@ def detect_blur_page(gray: np.ndarray, colour: np.ndarray | None = None) -> dict
     }
 
 
+def _blur_page_from_pdf(doc, i):
+    """Render page i of an open document at BLUR_DPI and run the blur check."""
+    page = doc[i]
+    pix = page.get_pixmap(dpi=BLUR_DPI)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+    del pix
+    if img.shape[2] >= 3:
+        rgb = img[:, :, :3]
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        # coloured ink (a blue or red library stamp, a highlighter) is
+        # not print: keep it out of the blur check
+        chroma = rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(np.int16)
+        colour = chroma > 40
+    else:
+        gray = img[:, :, 0].copy()
+        colour = None
+    del img
+    return detect_blur_page(gray, colour)
+
+
+def _blur_worker(args):
+    """Worker: blur check for a range of pages (one document open per range)."""
+    pdf_path, pages = args
+    out = []
+    doc = fitz.open(pdf_path)
+    try:
+        for i in pages:
+            try:
+                out.append((i, _blur_page_from_pdf(doc, i)))
+            except Exception as exc:
+                print(f"[audit] Blur check failed for page {i + 1}: {exc}",
+                      file=sys.stderr)
+                out.append((i, None))
+    finally:
+        doc.close()
+    return out
+
+
 def detect_blur_all(pdf_path: str, total: int,
                     blanks: list[bool]) -> list[dict]:
     """
     Run blur detection on all pages of a PDF.
 
+    The pages are checked in parallel (it is the slowest part of the audit:
+    every photo is rendered at BLUR_DPI); the result is the same as checking
+    them one by one.
+
     Returns a list of audit issues for pages with partial blur.
     """
     issues: list[dict] = []
-    doc = fitz.open(pdf_path)
+    todo = [i for i in range(total) if not (i < len(blanks) and blanks[i])]
+    results: dict[int, dict | None] = {}
 
-    for i in range(total):
-        if i < len(blanks) and blanks[i]:
-            continue
+    n_workers = max(1, min(os.cpu_count() or 2, 4))
+    if n_workers > 1 and len(todo) >= 8:
+        # contiguous chunks of ~8 pages per task
+        chunks = [todo[k:k + 8] for k in range(0, len(todo), 8)]
+        try:
+            ctx = multiprocessing.get_context('spawn')
+            with ctx.Pool(n_workers) as pool:
+                for part in pool.imap_unordered(_blur_worker,
+                                                [(pdf_path, c) for c in chunks]):
+                    for i, r in part:
+                        results[i] = r
+        except Exception as exc:
+            print(f"[audit] Parallel blur check failed ({exc}), "
+                  f"checking pages one by one", file=sys.stderr)
+            results = {}
+    if len(results) < len(todo):
+        for i, r in _blur_worker((pdf_path, [i for i in todo if i not in results])):
+            results[i] = r
 
-        page = doc[i]
-        pix = page.get_pixmap(dpi=BLUR_DPI)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-        del pix
-        if img.shape[2] >= 3:
-            rgb = img[:, :, :3]
-            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-            # coloured ink (a blue or red library stamp, a highlighter) is
-            # not print: keep it out of the blur check
-            chroma = rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(np.int16)
-            colour = chroma > 40
-        else:
-            gray = img[:, :, 0].copy()
-            colour = None
-        del img
-
-        result = detect_blur_page(gray, colour)
-        del gray
-
+    for i in todo:
+        result = results.get(i)
         if result:
             regions = result['blurry_regions']
             # Simplify region labels for readability
@@ -993,7 +1126,6 @@ def detect_blur_all(pdf_path: str, total: int,
                 'message': f"Page {i + 1}: partial blur detected ({region_str})",
             })
 
-    doc.close()
     print(f"[audit] Blur check: {len(issues)} page(s) with partial blur",
           file=sys.stderr)
     return issues
@@ -1012,50 +1144,71 @@ def is_blank_page(thumb: np.ndarray) -> bool:
 
 # ── OCR for non-OCR path ────────────────────────────────────────────
 
+def _ocr_bands(pdf_path: str, page_idx: int, dpi: int):
+    """Render a page at `dpi` and OCR its top and bottom bands.
+    Returns (words, width, height)."""
+    import pytesseract
+    doc = fitz.open(pdf_path)
+    page = doc[page_idx]
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w).copy()
+    h, w = img.shape
+    del pix
+    doc.close()
+
+    top_h = int(h * BAND_FRACTION)
+    bot_start = int(h * (1 - BAND_FRACTION))
+    bands = [
+        ('top', img[:top_h, :], 0),
+        ('bottom', img[bot_start:, :], bot_start),
+    ]
+
+    words = []
+    for band_name, band_img, y_offset in bands:
+        try:
+            data = pytesseract.image_to_data(
+                band_img, output_type=pytesseract.Output.DICT,
+                config='--psm 6'
+            )
+            for i in range(len(data['text'])):
+                text = data['text'][i].strip()
+                if not text:
+                    continue
+                conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
+                x = int(data['left'][i])
+                y = int(data['top'][i]) + y_offset
+                bw = int(data['width'][i])
+                bh = int(data['height'][i])
+                words.append({
+                    'text': text,
+                    'conf': conf,
+                    'bbox': [x, y, bw, bh],
+                })
+        except Exception:
+            pass
+    return words, w, h
+
+
+def _has_clear_number(words, w, h) -> bool:
+    return any(c.get('alone') and c['conf'] >= SPARSE_MIN_CONF
+               for c in extract_candidates(words, w, h))
+
+
 def _ocr_bands_worker(args):
-    """Worker: render a page at OCR_DPI, OCR top and bottom bands."""
+    """Worker: OCR the top and bottom bands of a page. Small page numbers on
+    a photo are sometimes misread at OCR_DPI ("119" read as "9"); a page
+    with no clearly read stand-alone number is read again at OCR_RETRY_DPI,
+    and that reading is kept if it has one."""
     pdf_path, page_idx, total = args
     try:
-        import pytesseract
-        doc = fitz.open(pdf_path)
-        page = doc[page_idx]
-        pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csGRAY)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w).copy()
-        h, w = img.shape
-        del pix
-        doc.close()
-
-        top_h = int(h * BAND_FRACTION)
-        bot_start = int(h * (1 - BAND_FRACTION))
-        bands = [
-            ('top', img[:top_h, :], 0),
-            ('bottom', img[bot_start:, :], bot_start),
-        ]
-
-        words = []
-        for band_name, band_img, y_offset in bands:
+        words, w, h = _ocr_bands(pdf_path, page_idx, OCR_DPI)
+        if not _has_clear_number(words, w, h):
             try:
-                data = pytesseract.image_to_data(
-                    band_img, output_type=pytesseract.Output.DICT,
-                    config='--psm 6'
-                )
-                for i in range(len(data['text'])):
-                    text = data['text'][i].strip()
-                    if not text:
-                        continue
-                    conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
-                    x = int(data['left'][i])
-                    y = int(data['top'][i]) + y_offset
-                    bw = int(data['width'][i])
-                    bh = int(data['height'][i])
-                    words.append({
-                        'text': text,
-                        'conf': conf,
-                        'bbox': [x, y, bw, bh],
-                    })
+                w2 = _ocr_bands(pdf_path, page_idx, OCR_RETRY_DPI)
+                if _has_clear_number(*w2):
+                    words, w, h = w2
             except Exception:
                 pass
-
         return (page_idx, words, w, h)
     except Exception as exc:
         print(f"[audit] OCR band failed for page {page_idx + 1}: {exc}",
@@ -1258,6 +1411,11 @@ def audit_book(output_pdf: str, tmp_dir: str,
         run_pages, smoothed = analyse_run(run)
         run['smoothed'] = smoothed
         run_issues = detect_issues(run_pages, smoothed, run['kind'], run['from_scan'])
+        if all(o is None for o in smoothed):
+            # too few pages to learn the numbering: compare readings directly
+            sparse_issues, rng = detect_issues_sparse(run_pages, run['kind'], run['from_scan'])
+            run_issues += sparse_issues
+            run['sparse_range'] = rng
         all_pages.extend(run_pages)
         all_issues.extend(run_issues)
 
@@ -1327,6 +1485,12 @@ def audit_book(output_pdf: str, tmp_dir: str,
                 printed_range = f"{int_to_roman(lo)}\u2013{int_to_roman(hi)}"
             else:
                 printed_range = f"{lo}\u2013{hi}"
+        elif run.get('sparse_range'):
+            lo, hi = run['sparse_range']
+            if run['kind'] == 'roman':
+                printed_range = f"{int_to_roman(lo)}\u2013{int_to_roman(hi)}"
+            else:
+                printed_range = f"{lo}\u2013{hi}"
         else:
             printed_range = '?'
         run_summaries.append({
@@ -1358,8 +1522,9 @@ def audit_book(output_pdf: str, tmp_dir: str,
 
     # Build summary
     if not all_issues:
-        range_parts = [r['printed'] for r in run_summaries
-                       if r['printed'] != '?' and r['to_scan'] - r['from_scan'] >= 3]
+        range_parts = [r['printed'] for r, run in zip(run_summaries, runs)
+                       if r['printed'] != '?' and (r['to_scan'] - r['from_scan'] >= 3
+                                                   or run.get('sparse_range'))]
         if range_parts:
             summary = f"Page numbers continuous: {', '.join(range_parts)}"
         else:
