@@ -60,6 +60,8 @@ BLUR_MIN_LETTERS = 30        # a block is judged only if it holds this many body
 BLUR_MIN_BLOCKS = 6          # need at least this many judged blocks on the page
 BLUR_RATIO_THRESHOLD = 0.875 # softest block / page's 75th percentile below this = blurry
 BLUR_REGION_RATIO = 0.9      # blocks below this are named in the message
+BLUR_DIR_THRESHOLD = 0.72    # same test per edge direction (catches motion blur)
+BLUR_DIR_REGION_RATIO = 0.85 # blocks below this (direction score) are named in the message
 
 # Roman numeral helpers
 _ROMAN_VALUES = {'i': 1, 'v': 5, 'x': 10, 'l': 50, 'c': 100, 'd': 500, 'm': 1000}
@@ -960,6 +962,25 @@ def _block_sharpness(grad, contrast, near, letters, sl) -> float | None:
     return float(np.percentile(grad[sl][m] / contrast[sl][m], 90))
 
 
+def _block_sharpness_dir(gx, gy, grad, contrast, near, sl) -> float:
+    """Like _block_sharpness, but per edge direction (0, 45, 90, 135 deg),
+    returning the softest direction. Motion blur (the camera moved) smears
+    letters in one direction only: edges across the motion stay crisp and
+    keep the all-direction score up, while the edges along it are soft."""
+    m = (contrast[sl] > 80) & near[sl]
+    if np.count_nonzero(m) < 200:
+        return 0.0
+    ang = np.degrees(np.arctan2(gy[sl][m], gx[sl][m])) % 180.0
+    ratio = grad[sl][m] / contrast[sl][m]
+    out = []
+    for a0 in (0.0, 45.0, 90.0, 135.0):
+        dist = np.abs(ang - a0)
+        sel = np.minimum(dist, 180.0 - dist) < 22.5
+        if np.count_nonzero(sel) >= 60:
+            out.append(float(np.percentile(ratio[sel], 90)))
+    return min(out) if out else 0.0
+
+
 def detect_blur_page(gray: np.ndarray, colour: np.ndarray | None = None) -> dict | None:
     """
     Detect partially blurry regions in a page photo.
@@ -995,28 +1016,41 @@ def detect_blur_page(gray: np.ndarray, colour: np.ndarray | None = None) -> dict
                 letters = np.where(drop, 0, letters)
                 near = near & ~cv2.dilate(drop.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     f = gray.astype(np.float32)
-    grad = np.hypot(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3),
-                    cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)) / 8.0
+    gx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.hypot(gx, gy) / 8.0
     k = np.ones((5, 5), np.uint8)
     contrast = cv2.dilate(gray, k).astype(np.float32) - cv2.erode(gray, k).astype(np.float32)
 
     scores: dict[str, float] = {}
+    dir_scores: dict[str, float] = {}
     for r in range(BLUR_GRID_ROWS):
         for c in range(BLUR_GRID_COLS):
             y0, y1 = r * h // BLUR_GRID_ROWS, (r + 1) * h // BLUR_GRID_ROWS
             x0, x1 = c * w // BLUR_GRID_COLS, (c + 1) * w // BLUR_GRID_COLS
-            sc = _block_sharpness(grad, contrast, near, letters, (slice(y0, y1), slice(x0, x1)))
+            sl = (slice(y0, y1), slice(x0, x1))
+            sc = _block_sharpness(grad, contrast, near, letters, sl)
             if sc is not None:
-                scores[f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"] = sc
+                lbl = f"{_GRID_LABELS_ROW[r]}-{_GRID_LABELS_COL[c]}"
+                scores[lbl] = sc
+                dir_scores[lbl] = _block_sharpness_dir(gx, gy, grad, contrast, near, sl)
 
     if len(scores) < BLUR_MIN_BLOCKS:
         return None
     ref = float(np.percentile(list(scores.values()), 75))
     if not ref > 0:
         return None
-    if min(scores.values()) / ref >= BLUR_RATIO_THRESHOLD:
+    soft_all = min(scores.values()) / ref < BLUR_RATIO_THRESHOLD
+    ref_dir = float(np.percentile(list(dir_scores.values()), 75))
+    soft_dir = ref_dir > 0 and min(dir_scores.values()) / ref_dir < BLUR_DIR_THRESHOLD
+    if not soft_all and not soft_dir:
         return None
-    blurry = [lbl for lbl, v in scores.items() if v / ref < BLUR_REGION_RATIO]
+    if soft_all:
+        blurry = [lbl for lbl, v in scores.items() if v / ref < BLUR_REGION_RATIO]
+    else:
+        # caught only by the per-direction test: name the regions by it
+        blurry = [lbl for lbl, v in dir_scores.items()
+                  if v / ref_dir < BLUR_DIR_REGION_RATIO]
     return {
         'blurry_regions': blurry,
         'scores': {k_: round(v / ref, 3) for k_, v in scores.items()},
@@ -1443,11 +1477,23 @@ def audit_book(output_pdf: str, tmp_dir: str,
         # number the user looks for in the book), scan page in brackets
         # expected number of each scan page from its run's sequence (a blurry
         # page's own number is often misread: 1287 read as "12")
+        # Only trusted when real readings back that numbering: at least 2
+        # other pages read nearby fit the same offset (a file of scattered
+        # extracted pages has no sequence, and its "smoothed" numbering is
+        # noise: page 34 would be named "Page 25").
         expected = {}
         for run in runs:
             sm = run.get('smoothed') or []
+            rp = all_pages[run['from_scan'] - 1:run['to_scan']]
             for k, o in enumerate(sm):
-                if o is not None:
+                if o is None:
+                    continue
+                support = sum(1 for j in range(max(0, k - SLIDING_WINDOW),
+                                               min(len(rp), k + SLIDING_WINDOW + 1))
+                              if j != k and rp[j].get('source') == 'read'
+                              and rp[j].get('value') is not None
+                              and rp[j]['value'] - j == o)
+                if support >= 2:
                     expected[run['from_scan'] - 1 + k] = (k + o, run['kind'])
         for bi in blur_issues:
             si = bi['after_scan'] - 1

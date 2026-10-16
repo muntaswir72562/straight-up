@@ -28,6 +28,7 @@ from page_audit import (
     _image_correlation,
     is_blank_page,
     detect_issues_sparse,
+    detect_blur_page,
 )
 
 
@@ -462,6 +463,44 @@ class TestShortFile(unittest.TestCase):
         run_pages, _ = analyse_run(run)
         issues, _ = detect_issues_sparse(run_pages, run['kind'], run['from_scan'])
         self.assertEqual(issues, [])
+
+
+class TestMotionBlur(unittest.TestCase):
+    """Motion blur (the camera moved) smears letters in one direction only.
+    A text page with its middle smeared vertically must be flagged; the same
+    page unsmeared must not."""
+
+    @staticmethod
+    def _page():
+        import cv2
+        rng = np.random.RandomState(0)
+        img = np.full((1600, 1100), 245, np.uint8)
+        words = ['court', 'judge', 'order', 'appeal', 'section', 'held', 'the', 'of', 'contempt']
+        y = 80
+        while y < 1540:
+            x = 60
+            while x < 980:
+                w = words[rng.randint(len(words))]
+                cv2.putText(img, w, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, 20, 2, cv2.LINE_AA)
+                x += 22 * len(w) + 18
+            y += 40
+        return img
+
+    def test_sharp_page_not_flagged(self):
+        self.assertIsNone(detect_blur_page(self._page()))
+
+    def test_vertical_motion_blur_flagged(self):
+        import cv2
+        img = self._page()
+        k = np.zeros((9, 9), np.float32)
+        k[:, 4] = 1.0 / 9          # vertical smear
+        mid = img[640:1280].copy()
+        img[640:1280] = cv2.filter2D(mid, -1, k)
+        res = detect_blur_page(img)
+        self.assertIsNotNone(res)
+        rows = {r.split('-')[0] for r in res['blurry_regions']}
+        self.assertTrue(rows & {'middle', 'lower'})
+        self.assertFalse(rows & {'top'})
 
 
 # ── Entry point ──────────────────────────────────────────────────────
