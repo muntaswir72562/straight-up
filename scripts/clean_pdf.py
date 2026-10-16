@@ -58,6 +58,8 @@ MARGIN_FRACTION = 0.03     # ignore this fraction at page edges
 BG_KERNEL_SIZE = 51        # morphological closing kernel for background
 BLUR_SIZE = 3              # Gaussian blur kernel
 JPEG_QUALITY = 90
+NO_PRINT_BLACK_PT = 170      # darkest print lighter than this = page without print (printed pages measure <= 132, blank backs >= 195)
+NO_PRINT_MARGIN = 15        # white point this far under the show-through level
 
 # Straighten (deskew) constants
 MAX_SKEW_ANGLE = 10.0      # max detectable skew (degrees)
@@ -279,6 +281,15 @@ def clean_page(gray):
     dark_pixels = ref[ref < otsu_val]
     black_pt = float(np.percentile(dark_pixels, 2)) if len(dark_pixels) > 100 else 0.0
     del dark_pixels, ref
+    if black_pt > NO_PRINT_BLACK_PT:
+        # No print on the page (a blank page, the back of a leaf): its
+        # "darkest" marks are only show-through from the other side and paper
+        # grain. Stretching them to black made blank pages grey and grainy
+        # with the show-through printed in. Instead keep black at 0 and put
+        # the white point just under those marks, so they turn white while
+        # anything really dark (a pen mark) stays visible.
+        white_pt = max(black_pt - NO_PRINT_MARGIN, 64.0)
+        black_pt = 0.0
     if white_pt - black_pt < 10:
         white_pt = black_pt + 10
 
