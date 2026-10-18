@@ -192,7 +192,7 @@ function FullscreenPage({
       try {
         let url: string;
         if (replacement) {
-          url = await renderFilePreview(replacement);
+          url = await renderFilePreview(replacement, FULLSCREEN_RENDER_WIDTH);
         } else {
           url = await renderThumbnail(pdf, pageNumber, FULLSCREEN_RENDER_WIDTH);
         }
@@ -381,18 +381,23 @@ function FullscreenInserted({
   insertion,
   locked,
   onRemove,
+  onInsert,
+  onStartInpaint,
   renderWidth,
 }: {
   insertion: Insertion;
   locked: boolean;
   onRemove: (id: string) => void;
+  onInsert: (afterPage: number, file: File) => void;
+  onStartInpaint: (insertionId: string) => void;
   renderWidth: number;
 }) {
+  const insertFileRef = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    renderFilePreview(insertion.file).then((u) => {
+    renderFilePreview(insertion.file, FULLSCREEN_RENDER_WIDTH).then((u) => {
       if (cancelled) URL.revokeObjectURL(u);
       else setUrl(u);
     }).catch(() => {});
@@ -433,7 +438,29 @@ function FullscreenInserted({
         </span>
       </div>
       {!locked && (
-        <div className="flex items-center gap-2 mt-3">
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap justify-center">
+          <input
+            ref={insertFileRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,application/pdf,.pdf"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f && isAcceptedFile(f)) onInsert(insertion.afterPage, f);
+              e.target.value = '';
+            }}
+            tabIndex={-1}
+          />
+          <ActionBtn
+            label="Insert After"
+            icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="6" y1="2" x2="6" y2="10" /><line x1="2" y1="6" x2="10" y2="6" /></svg>}
+            onClick={() => insertFileRef.current?.click()}
+          />
+          <ActionBtn
+            label="Remove Artifact"
+            icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.5 5.5a5 5 0 0 1-9 3M1.5 6.5a5 5 0 0 1 9-3" /><circle cx="6" cy="6" r="1.5" /></svg>}
+            onClick={() => onStartInpaint(insertion.id)}
+          />
           <ActionBtn
             label="Remove"
             icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="2" y1="2" x2="10" y2="10" /><line x1="10" y1="2" x2="2" y2="10" /></svg>}
@@ -499,6 +526,7 @@ interface FullscreenViewerProps {
   onUndoDelete: (pageNumber: number) => void;
   onInsert: (afterPage: number, file: File) => void;
   onRemoveInsert: (id: string) => void;
+  onUpdateInsertionFile: (id: string, file: File) => void;
   onToggleSelect: (pageNumber: number) => void;
   onMoveTo: (afterPage: number) => void;
   onClearSelection: () => void;
@@ -521,6 +549,7 @@ export function FullscreenViewer({
   onUndoDelete,
   onInsert,
   onRemoveInsert,
+  onUpdateInsertionFile,
   onToggleSelect,
   onMoveTo,
   onClearSelection,
@@ -536,6 +565,7 @@ export function FullscreenViewer({
 
   // Inpaint state
   const [inpaintPage, setInpaintPage] = useState<number | null>(null);
+  const [inpaintInsertionId, setInpaintInsertionId] = useState<string | null>(null);
   const [inpaintImageUrl, setInpaintImageUrl] = useState<string | null>(null);
   const [inpaintDims, setInpaintDims] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [inpaintProcessing, setInpaintProcessing] = useState(false);
@@ -558,7 +588,7 @@ export function FullscreenViewer({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (inpaintPage !== null) {
+        if (inpaintPage !== null || inpaintInsertionId !== null) {
           handleCancelInpaint();
         } else {
           onClose();
@@ -567,7 +597,7 @@ export function FullscreenViewer({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onClose, inpaintPage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onClose, inpaintPage, inpaintInsertionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Track which page is most visible
   const handleObserve = useCallback((pageNumber: number, ratio: number) => {
@@ -639,16 +669,36 @@ export function FullscreenViewer({
     setInpaintPage(pageNumber);
   }, [pdf, replacements]);
 
+  const handleStartInpaintInsertion = useCallback(async (insertionId: string) => {
+    setInpaintError(null);
+    setInpaintProcessing(false);
+
+    const insertion = insertions.find((ins) => ins.id === insertionId);
+    if (!insertion) return;
+
+    const url = URL.createObjectURL(insertion.file);
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load insertion'));
+      img.src = url;
+    });
+    setInpaintDims({ w: img.naturalWidth, h: img.naturalHeight });
+    setInpaintImageUrl(url);
+    setInpaintInsertionId(insertionId);
+  }, [insertions]);
+
   const handleCancelInpaint = useCallback(() => {
     if (inpaintImageUrl) URL.revokeObjectURL(inpaintImageUrl);
     setInpaintPage(null);
+    setInpaintInsertionId(null);
     setInpaintImageUrl(null);
     setInpaintError(null);
     setInpaintProcessing(false);
   }, [inpaintImageUrl]);
 
   const handleInpaintComplete = useCallback(async (mask: Blob, image: Blob) => {
-    if (inpaintPage === null) return;
+    if (inpaintPage === null && inpaintInsertionId === null) return;
     setInpaintProcessing(true);
     setInpaintError(null);
 
@@ -664,14 +714,19 @@ export function FullscreenViewer({
       }
 
       const resultBlob = await response.blob();
-      const resultFile = new File([resultBlob], `inpainted-page-${inpaintPage}.jpg`, { type: 'image/jpeg' });
-      onReplace(inpaintPage, resultFile);
+      if (inpaintInsertionId) {
+        const resultFile = new File([resultBlob], `inpainted-insertion-${inpaintInsertionId}.jpg`, { type: 'image/jpeg' });
+        onUpdateInsertionFile(inpaintInsertionId, resultFile);
+      } else if (inpaintPage !== null) {
+        const resultFile = new File([resultBlob], `inpainted-page-${inpaintPage}.jpg`, { type: 'image/jpeg' });
+        onReplace(inpaintPage, resultFile);
+      }
       handleCancelInpaint();
     } catch (err) {
       setInpaintError(err instanceof Error ? err.message : 'Inpaint failed');
       setInpaintProcessing(false);
     }
-  }, [inpaintPage, onReplace, handleCancelInpaint]);
+  }, [inpaintPage, inpaintInsertionId, onReplace, onUpdateInsertionFile, handleCancelInpaint]);
 
   // Build flat list (same as PageGrid), respecting pageOrder
   type ViewItem =
@@ -848,6 +903,8 @@ export function FullscreenViewer({
                   insertion={item.insertion}
                   locked={locked}
                   onRemove={onRemoveInsert}
+                  onInsert={onInsert}
+                  onStartInpaint={handleStartInpaintInsertion}
                   renderWidth={pageWidth}
                 />
               );
@@ -953,7 +1010,7 @@ export function FullscreenViewer({
       )}
 
       {/* Inpaint overlay */}
-      {inpaintPage !== null && inpaintImageUrl && (
+      {(inpaintPage !== null || inpaintInsertionId !== null) && inpaintImageUrl && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 300,
           background: 'oklch(15% 0.02 270 / 0.85)',
@@ -968,7 +1025,7 @@ export function FullscreenViewer({
             borderBottom: '1px solid oklch(100% 0 0 / 0.1)',
           }}>
             <span className="text-sm font-medium" style={{ color: '#fff' }}>
-              Draw around the artifact to remove it — Page {inpaintPage}
+              Draw around the artifact to remove it — {inpaintInsertionId ? 'Inserted page' : `Page ${inpaintPage}`}
             </span>
             <div className="flex items-center gap-2">
               {inpaintError && (

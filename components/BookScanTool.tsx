@@ -563,6 +563,12 @@ export function BookScanTool() {
     setInsertions((prev) => prev.filter((ins) => ins.id !== id));
   }, []);
 
+  const handleUpdateInsertionFile = useCallback((id: string, file: File) => {
+    setInsertions((prev) =>
+      prev.map((ins) => (ins.id === id ? { ...ins, file } : ins)),
+    );
+  }, []);
+
   // --- Replace mode: Selection & Move ---
   const handleToggleSelect = useCallback((pageNumber: number) => {
     setSelectedPages((prev) => {
@@ -1857,6 +1863,7 @@ export function BookScanTool() {
         onUndoDelete={handleUndoDelete}
         onInsert={handleInsert}
         onRemoveInsert={handleRemoveInsert}
+        onUpdateInsertionFile={handleUpdateInsertionFile}
         onToggleSelect={handleToggleSelect}
         onMoveTo={handleMoveTo}
         onClearSelection={handleClearSelection}
