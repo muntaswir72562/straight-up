@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { rm } from 'fs/promises';
 import { existsSync, statSync, createReadStream } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -28,10 +27,9 @@ export async function GET(req: NextRequest) {
   const nodeStream = createReadStream(filePath);
   const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
-  // Clean up temp dir after download
-  nodeStream.on('close', () => {
-    rm(tempDir, { recursive: true, force: true }).catch(() => {});
-  });
+  // Temp dir is cleaned up by the main route's 10-minute spawnPython timeout.
+  // Do NOT delete here — runOcrOnServer auto-downloads via link.click(),
+  // then the user may re-download from the ResultPanel.
 
   return new NextResponse(webStream, {
     headers: {

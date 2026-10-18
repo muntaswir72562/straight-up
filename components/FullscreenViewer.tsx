@@ -397,16 +397,31 @@ function FullscreenInserted({
 
   useEffect(() => {
     let cancelled = false;
+    setUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     renderFilePreview(insertion.file, FULLSCREEN_RENDER_WIDTH).then((u) => {
-      if (cancelled) URL.revokeObjectURL(u);
-      else setUrl(u);
+      if (cancelled) {
+        URL.revokeObjectURL(u);
+      } else {
+        setUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return u;
+        });
+      }
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [insertion.file]);
 
   useEffect(() => {
-    return () => { if (url) URL.revokeObjectURL(url); };
-  }, [url]);
+    return () => {
+      setUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+    };
+  }, []);
 
   return (
     <div style={{

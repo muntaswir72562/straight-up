@@ -494,10 +494,12 @@ export function BookScanTool() {
             // Load PDFDocumentProxy for thumbnail rendering, then pdf-lib for fast JPEG extraction
             loadPdfDocument(file).then((pdf) => {
               setReplacePdf(pdf);
-              // Load pdf-lib extraction using pdfjs fingerprint for identity gating
-              file.arrayBuffer().then((ab) =>
-                loadForExtraction(new Uint8Array(ab), pdf.fingerprints[0] ?? '')
-              ).catch(() => { /* extraction is optional, pdfjs fallback works */ });
+              // Eagerly buffer the original PDF so File reference can't go stale,
+              // then load pdf-lib extraction using pdfjs fingerprint for identity gating
+              file.arrayBuffer().then((ab) => {
+                setReplaceFile(new File([ab], file.name, { type: file.type }));
+                loadForExtraction(new Uint8Array(ab), pdf.fingerprints[0] ?? '');
+              }).catch(() => { /* extraction is optional, pdfjs fallback works */ });
             }).catch(() => {
               setReplaceError("Failed to load PDF for preview.");
             });
@@ -519,8 +521,11 @@ export function BookScanTool() {
   );
 
   // --- Replace mode: Page replacement ---
-  const handleReplace = useCallback((pageNumber: number, file: File) => {
-    setReplacements((prev) => new Map(prev).set(pageNumber, file));
+  const handleReplace = useCallback(async (pageNumber: number, file: File) => {
+    // Eagerly read into memory to prevent stale File references (OneDrive, etc.)
+    const buffer = await file.arrayBuffer();
+    const memFile = new File([buffer], file.name, { type: file.type });
+    setReplacements((prev) => new Map(prev).set(pageNumber, memFile));
   }, []);
 
   const handleUndoReplace = useCallback((pageNumber: number) => {
@@ -552,10 +557,13 @@ export function BookScanTool() {
   }, []);
 
   // --- Replace mode: Insert page ---
-  const handleInsert = useCallback((afterPage: number, file: File) => {
+  const handleInsert = useCallback(async (afterPage: number, file: File) => {
+    // Eagerly read into memory to prevent stale File references (OneDrive, etc.)
+    const buffer = await file.arrayBuffer();
+    const memFile = new File([buffer], file.name, { type: file.type });
     setInsertions((prev) => [
       ...prev,
-      { afterPage, file, id: crypto.randomUUID() },
+      { afterPage, file: memFile, id: crypto.randomUUID() },
     ]);
   }, []);
 
