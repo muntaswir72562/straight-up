@@ -60,6 +60,9 @@ BLUR_SIZE = 3              # Gaussian blur kernel
 JPEG_QUALITY = 90
 NO_PRINT_BLACK_PT = 170      # darkest print lighter than this = page without print (printed pages measure <= 132, blank backs >= 195)
 NO_PRINT_MARGIN = 15        # white point this far under the show-through level
+CLEAN_PAPER_BG = 248        # paper at least this white in the photo is already clean
+KEEP_INK_DARK = 110         # letter strokes: darker than this after paper normalisation
+KEEP_INK_RADIUS = 2         # pixels this close to a letter stroke keep their photo darkness
 
 # Straighten (deskew) constants
 MAX_SKEW_ANGLE = 10.0      # max detectable skew (degrees)
@@ -268,7 +271,7 @@ def clean_page(gray):
 
     # Division normalization (paper tone → white)
     normalized = cv2.divide(blurred, bg, scale=255)
-    del blurred, bg
+    del blurred
 
     # Levels reference: thin/faint features (bleed-through, specks) removed
     inverted = cv2.bitwise_not(normalized)
@@ -299,6 +302,26 @@ def clean_page(gray):
         0, 255,
     ).astype(np.uint8)
     del normalized
+
+    # Where the paper in the photo is already clean white, keep the letters as
+    # they are. The blur and the contrast stretch above are made for grey,
+    # soft photos; on paper that is already clean they erased the hairlines
+    # of small print (the bar of an H, serifs, thin curves), so a page that
+    # was clean at the top and grey below came out with the clean part pale
+    # and broken. Only pixels on or right next to letter strokes are kept at
+    # their photo darkness, never lighter than the clean made them dark;
+    # paper, specks and show-through away from the letters are cleaned as
+    # before (a stamp ghost on clean paper is still removed).
+    clean_paper = bg >= CLEAN_PAPER_BG
+    if clean_paper.any():
+        sharp = cv2.divide(gray, bg, scale=255)
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * KEEP_INK_RADIUS + 1, 2 * KEEP_INK_RADIUS + 1))
+        near_ink = cv2.dilate((sharp < KEEP_INK_DARK).astype(np.uint8), k) > 0
+        keep = clean_paper & near_ink & (sharp < stretched)
+        stretched[keep] = sharp[keep]
+        del sharp, near_ink, keep
+    del bg, clean_paper
     return stretched
 
 
