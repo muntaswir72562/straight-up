@@ -9,6 +9,8 @@ export interface Insertion {
   afterPage: number;
   file: File;
   id: string;
+  /** Clockwise rotation in degrees (0/90/180/270) */
+  rotation?: number;
 }
 
 interface PageGridProps {

@@ -1,6 +1,7 @@
 import { PDFDocument } from 'pdf-lib';
 import { assemblePdf, type AssemblePage } from './pdf/assemble';
 import { sanitizeBookName } from './filename';
+import { normalizeRotation, rotateImageBlob } from './pdf/rotate';
 import { JPEG_QUALITY, MAX_RENDER_DIMENSION, RENDER_DPI } from './constants';
 import type { PipelineResult, PipelinePhase, PipelineProgress } from './pipeline';
 import type { Insertion } from '@/components/PageGrid';
@@ -111,6 +112,48 @@ async function fileToJpeg(file: File, quality: number): Promise<Uint8Array> {
     return pdfFileToJpeg(file, quality);
   }
   return imageFileToJpeg(file, quality);
+}
+
+/**
+ * Render a page of the source PDF to JPEG bytes at RENDER_DPI.
+ */
+async function sourcePageToJpeg(
+  pdf: import('pdfjs-dist').PDFDocumentProxy,
+  pageNumber: number,
+  quality: number,
+): Promise<Uint8Array> {
+  const { renderPage } = await import('@/lib/pdf/render');
+  const result = await renderPage(pdf, pageNumber, RENDER_DPI);
+  const canvas = document.createElement('canvas');
+  canvas.width = result.width;
+  canvas.height = result.height;
+  const ctx = canvas.getContext('2d')!;
+  const imgData = ctx.createImageData(result.width, result.height);
+  imgData.data.set(result.imageData);
+  ctx.putImageData(imgData, 0, 0);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('Canvas toBlob failed'))),
+      'image/jpeg',
+      quality
+    );
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/**
+ * Rotate JPEG bytes clockwise by `degrees` (no-op for 0).
+ */
+async function rotateJpeg(bytes: Uint8Array, degrees: number): Promise<Uint8Array> {
+  if (normalizeRotation(degrees) === 0) return bytes;
+  return rotateImageBlob(new Blob([bytes as BlobPart], { type: 'image/jpeg' }), degrees, JPEG_QUALITY);
+}
+
+/** Swap page width/height for quarter-turn rotations. */
+function rotatedSize(size: { width: number; height: number }, degrees: number) {
+  const rot = normalizeRotation(degrees);
+  return rot === 90 || rot === 270 ? { width: size.height, height: size.width } : size;
 }
 
 /**
@@ -253,9 +296,9 @@ async function runOcrOnServer(
 }
 
 /**
- * Replace-pages pipeline: swap, delete, or insert pages in a PDF,
- * then reassemble. If replaced/inserted pages exist, run OCR on them
- * server-side so the output remains searchable.
+ * Replace-pages pipeline: swap, delete, insert, or rotate pages in a PDF,
+ * then reassemble. If replaced/inserted/rotated pages exist, run OCR on
+ * them server-side so the output remains searchable.
  */
 export async function runReplacePipeline(
   file: File,
@@ -263,6 +306,7 @@ export async function runReplacePipeline(
   deletions: Set<number>,
   insertions: Insertion[],
   pageOrder: number[], // 1-based page numbers in display/output order
+  rotations: Map<number, number>, // 1-based pageNumber → clockwise degrees
   bookName: string,
   onProgress: (progress: PipelineProgress) => void,
   cancelRef: { cancelled: boolean }
@@ -283,6 +327,11 @@ export async function runReplacePipeline(
   const convertedReplacements = new Map<number, Uint8Array>();
   const pdfReplacementPages = new Set<number>(); // track which replacements are from PDFs
   const replacementEntries = Array.from(replacements.entries());
+  // Rotated original pages (not replaced, not deleted) must be rasterized
+  const rotatedOriginals = Array.from(rotations.entries())
+    .filter(([pn, deg]) => normalizeRotation(deg) !== 0 && !replacements.has(pn) && !deletions.has(pn))
+    .map(([pn]) => pn);
+  const prepTotal = replacementEntries.length + insertions.length + rotatedOriginals.length;
 
   for (let i = 0; i < replacementEntries.length; i++) {
     if (cancelRef.cancelled) throw new Error('Cancelled');
@@ -291,12 +340,33 @@ export async function runReplacePipeline(
     onProgress({
       phase: 'preparing' as PipelinePhase,
       current: i + 1,
-      total: replacementEntries.length + insertions.length,
+      total: prepTotal,
     });
 
     if (isPdfFile(srcFile)) pdfReplacementPages.add(pageNum);
     const jpegBytes = await fileToJpeg(srcFile, JPEG_QUALITY);
-    convertedReplacements.set(pageNum, jpegBytes);
+    convertedReplacements.set(pageNum, await rotateJpeg(jpegBytes, rotations.get(pageNum) ?? 0));
+  }
+
+  // Render + rotate original pages that were only rotated
+  if (rotatedOriginals.length > 0) {
+    const { loadPdfDocument } = await import('@/lib/pdf/render');
+    const srcPdf = await loadPdfDocument(file);
+    try {
+      for (let i = 0; i < rotatedOriginals.length; i++) {
+        if (cancelRef.cancelled) throw new Error('Cancelled');
+        const pageNum = rotatedOriginals[i];
+        onProgress({
+          phase: 'preparing' as PipelinePhase,
+          current: replacementEntries.length + i + 1,
+          total: prepTotal,
+        });
+        const jpegBytes = await sourcePageToJpeg(srcPdf, pageNum, JPEG_QUALITY);
+        convertedReplacements.set(pageNum, await rotateJpeg(jpegBytes, rotations.get(pageNum)!));
+      }
+    } finally {
+      srcPdf.destroy();
+    }
   }
 
   // Convert insertion files (images or PDFs) to JPEG
@@ -309,13 +379,13 @@ export async function runReplacePipeline(
     const ins = insertions[i];
     onProgress({
       phase: 'preparing' as PipelinePhase,
-      current: replacementEntries.length + i + 1,
-      total: replacementEntries.length + insertions.length,
+      current: replacementEntries.length + rotatedOriginals.length + i + 1,
+      total: prepTotal,
     });
 
     if (isPdfFile(ins.file)) pdfInsertionIds.add(ins.id);
     const jpegBytes = await fileToJpeg(ins.file, JPEG_QUALITY);
-    convertedInsertions.set(ins.id, jpegBytes);
+    convertedInsertions.set(ins.id, await rotateJpeg(jpegBytes, ins.rotation ?? 0));
   }
 
   if (cancelRef.cancelled) throw new Error('Cancelled');
@@ -347,7 +417,7 @@ export async function runReplacePipeline(
   for (const ins of insertions.filter((i) => i.afterPage === 0)) {
     outputIndex++;
     const jpegBytes = convertedInsertions.get(ins.id)!;
-    const pageSize = getNearestPageSize(0);
+    const pageSize = rotatedSize(getNearestPageSize(0), ins.rotation ?? 0);
     assemblePages.push({
       kind: 'straightened',
       jpegBytes,
@@ -369,7 +439,7 @@ export async function runReplacePipeline(
 
       const replacementJpeg = convertedReplacements.get(pageNum);
       if (replacementJpeg) {
-        const { width, height } = getPageSize(pageNum);
+        const { width, height } = rotatedSize(getPageSize(pageNum), rotations.get(pageNum) ?? 0);
         assemblePages.push({
           kind: 'straightened',
           jpegBytes: replacementJpeg,
@@ -388,7 +458,7 @@ export async function runReplacePipeline(
     for (const ins of insertions.filter((ins) => ins.afterPage === pageNum)) {
       outputIndex++;
       const jpegBytes = convertedInsertions.get(ins.id)!;
-      const pageSize = getNearestPageSize(pageNum);
+      const pageSize = rotatedSize(getNearestPageSize(pageNum), ins.rotation ?? 0);
       assemblePages.push({
         kind: 'straightened',
         jpegBytes,

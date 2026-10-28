@@ -5,6 +5,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { renderThumbnail } from '@/lib/pdf/thumbnail';
 import { renderFilePreview } from '@/lib/pdf/filePreview';
 import { renderPage } from '@/lib/pdf/render';
+import { rotateImageUrl } from '@/lib/pdf/rotate';
 import { THUMBNAIL_WIDTH, FULLSCREEN_RENDER_WIDTH, RENDER_DPI } from '@/lib/constants';
 import { LassoCanvas } from './LassoCanvas';
 import type { Insertion } from './PageGrid';
@@ -25,6 +26,7 @@ function SidebarThumb({
   isReplaced,
   isDeleted,
   isSelected,
+  rotation,
   onClick,
 }: {
   pdf: PDFDocumentProxy;
@@ -33,6 +35,7 @@ function SidebarThumb({
   isReplaced: boolean;
   isDeleted: boolean;
   isSelected: boolean;
+  rotation: number;
   onClick: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -89,7 +92,15 @@ function SidebarThumb({
       }}
     >
       {url && (
-        <img src={url} alt={`Page ${pageNumber}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} draggable={false} />
+        <img
+          src={url}
+          alt={`Page ${pageNumber}`}
+          style={{
+            width: '100%', height: '100%', objectFit: 'cover',
+            transform: rotation ? `rotate(${rotation}deg)` : undefined,
+          }}
+          draggable={false}
+        />
       )}
       <span style={{
         position: 'absolute', bottom: 1, left: 0, right: 0, textAlign: 'center',
@@ -124,6 +135,7 @@ function FullscreenPage({
   isDeleted,
   isReplaced,
   isSelected,
+  rotation,
   locked,
   onReplace,
   onUndoReplace,
@@ -132,6 +144,7 @@ function FullscreenPage({
   onInsert,
   onStartInpaint,
   onToggleSelect,
+  onRotate,
   onObserve,
   renderWidth,
 }: {
@@ -142,6 +155,7 @@ function FullscreenPage({
   isDeleted: boolean;
   isReplaced: boolean;
   isSelected: boolean;
+  rotation: number;
   locked: boolean;
   onReplace: (pageNumber: number, file: File) => void;
   onUndoReplace: (pageNumber: number) => void;
@@ -150,6 +164,7 @@ function FullscreenPage({
   onInsert: (afterPage: number, file: File) => void;
   onStartInpaint: (pageNumber: number) => void;
   onToggleSelect: (pageNumber: number) => void;
+  onRotate: (pageNumber: number, delta: number) => void;
   onObserve: (pageNumber: number, ratio: number) => void;
   renderWidth: number;
 }) {
@@ -196,6 +211,11 @@ function FullscreenPage({
         } else {
           url = await renderThumbnail(pdf, pageNumber, FULLSCREEN_RENDER_WIDTH);
         }
+        if (rotation && !cancelled) {
+          const rotated = await rotateImageUrl(url, rotation);
+          URL.revokeObjectURL(url);
+          url = rotated;
+        }
         if (cancelled) {
           URL.revokeObjectURL(url);
         } else {
@@ -215,7 +235,7 @@ function FullscreenPage({
     });
     render();
     return () => { cancelled = true; };
-  }, [hasBeenVisible, pdf, pageNumber, replacement]);
+  }, [hasBeenVisible, pdf, pageNumber, replacement, rotation]);
 
   useEffect(() => {
     return () => {
@@ -295,6 +315,7 @@ function FullscreenPage({
             Deleted
           </span>
         )}
+        {rotation !== 0 && !isDeleted && <RotatedBadge rotation={rotation} />}
       </div>
 
       {/* Action buttons */}
@@ -332,6 +353,7 @@ function FullscreenPage({
                 icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 4h10M8 1l3 3-3 3" /><path d="M11 8H1M4 11l-3-3 3-3" /></svg>}
                 onClick={() => fileInputRef.current?.click()}
               />
+              <RotateButtons onRotate={(delta) => onRotate(pageNumber, delta)} />
               <ActionBtn
                 label="Delete"
                 icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 3h9M4.5 3V1.5h3V3M3 3v7.5h6V3" /></svg>}
@@ -383,6 +405,7 @@ function FullscreenInserted({
   onRemove,
   onInsert,
   onStartInpaint,
+  onRotate,
   renderWidth,
 }: {
   insertion: Insertion;
@@ -390,8 +413,10 @@ function FullscreenInserted({
   onRemove: (id: string) => void;
   onInsert: (afterPage: number, file: File) => void;
   onStartInpaint: (insertionId: string) => void;
+  onRotate: (insertionId: string, delta: number) => void;
   renderWidth: number;
 }) {
+  const rotation = insertion.rotation ?? 0;
   const insertFileRef = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState<string | null>(null);
 
@@ -401,7 +426,12 @@ function FullscreenInserted({
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
-    renderFilePreview(insertion.file, FULLSCREEN_RENDER_WIDTH).then((u) => {
+    renderFilePreview(insertion.file, FULLSCREEN_RENDER_WIDTH).then(async (u) => {
+      if (rotation && !cancelled) {
+        const rotated = await rotateImageUrl(u, rotation);
+        URL.revokeObjectURL(u);
+        u = rotated;
+      }
       if (cancelled) {
         URL.revokeObjectURL(u);
       } else {
@@ -412,7 +442,7 @@ function FullscreenInserted({
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [insertion.file]);
+  }, [insertion.file, rotation]);
 
   useEffect(() => {
     return () => {
@@ -451,6 +481,7 @@ function FullscreenInserted({
         }}>
           Inserted
         </span>
+        {rotation !== 0 && <RotatedBadge rotation={rotation} />}
       </div>
       {!locked && (
         <div className="flex items-center gap-1.5 mt-2 flex-wrap justify-center">
@@ -471,6 +502,7 @@ function FullscreenInserted({
             icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="6" y1="2" x2="6" y2="10" /><line x1="2" y1="6" x2="10" y2="6" /></svg>}
             onClick={() => insertFileRef.current?.click()}
           />
+          <RotateButtons onRotate={(delta) => onRotate(insertion.id, delta)} />
           <ActionBtn
             label="Remove Artifact"
             icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.5 5.5a5 5 0 0 1-9 3M1.5 6.5a5 5 0 0 1 9-3" /><circle cx="6" cy="6" r="1.5" /></svg>}
@@ -522,6 +554,38 @@ function ActionBtn({
   );
 }
 
+// ── Rotate controls ────────────────────────────────────────────────
+
+function RotateButtons({ onRotate }: { onRotate: (delta: number) => void }) {
+  return (
+    <>
+      <ActionBtn
+        label="Rotate Left"
+        icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 6a3.5 3.5 0 1 0 1.1-2.55" /><polyline points="2 1.5 2 4 4.5 4" /></svg>}
+        onClick={() => onRotate(-90)}
+      />
+      <ActionBtn
+        label="Rotate Right"
+        icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 6a3.5 3.5 0 1 1-1.1-2.55" /><polyline points="10 1.5 10 4 7.5 4" /></svg>}
+        onClick={() => onRotate(90)}
+      />
+    </>
+  );
+}
+
+function RotatedBadge({ rotation }: { rotation: number }) {
+  return (
+    <span style={{
+      position: 'absolute', bottom: 8, right: 8,
+      padding: '2px 8px', fontSize: '0.7rem', fontWeight: 600,
+      color: '#fff', background: 'var(--color-primary)',
+      borderRadius: 'var(--radius-sm)',
+    }}>
+      Rotated {rotation}°
+    </span>
+  );
+}
+
 // ── FullscreenViewer ───────────────────────────────────────────────
 
 interface FullscreenViewerProps {
@@ -530,6 +594,7 @@ interface FullscreenViewerProps {
   replacements: Map<number, File>;
   deletions: Set<number>;
   insertions: Insertion[];
+  rotations: Map<number, number>;
   locked: boolean;
   pageOrder: number[];
   selectedPages: Set<number>;
@@ -542,6 +607,8 @@ interface FullscreenViewerProps {
   onInsert: (afterPage: number, file: File) => void;
   onRemoveInsert: (id: string) => void;
   onUpdateInsertionFile: (id: string, file: File) => void;
+  onRotate: (pageNumber: number, delta: number) => void;
+  onRotateInsertion: (id: string, delta: number) => void;
   onToggleSelect: (pageNumber: number) => void;
   onMoveTo: (afterPage: number) => void;
   onClearSelection: () => void;
@@ -553,6 +620,7 @@ export function FullscreenViewer({
   replacements,
   deletions,
   insertions,
+  rotations,
   locked,
   pageOrder,
   selectedPages,
@@ -565,6 +633,8 @@ export function FullscreenViewer({
   onInsert,
   onRemoveInsert,
   onUpdateInsertionFile,
+  onRotate,
+  onRotateInsertion,
   onToggleSelect,
   onMoveTo,
   onClearSelection,
@@ -887,6 +957,7 @@ export function FullscreenViewer({
               isReplaced={replacements.has(pn)}
               isDeleted={deletions.has(pn)}
               isSelected={selectedPages.has(pn)}
+              rotation={rotations.get(pn) ?? 0}
               onClick={() => jumpToPage(pn)}
             />
           ))}
@@ -920,6 +991,7 @@ export function FullscreenViewer({
                   onRemove={onRemoveInsert}
                   onInsert={onInsert}
                   onStartInpaint={handleStartInpaintInsertion}
+                  onRotate={onRotateInsertion}
                   renderWidth={pageWidth}
                 />
               );
@@ -935,6 +1007,7 @@ export function FullscreenViewer({
                 isDeleted={deletions.has(pn)}
                 isReplaced={replacements.has(pn)}
                 isSelected={selectedPages.has(pn)}
+                rotation={rotations.get(pn) ?? 0}
                 locked={locked}
                 onReplace={onReplace}
                 onUndoReplace={onUndoReplace}
@@ -943,6 +1016,7 @@ export function FullscreenViewer({
                 onInsert={onInsert}
                 onStartInpaint={handleStartInpaint}
                 onToggleSelect={onToggleSelect}
+                onRotate={onRotate}
                 onObserve={handleObserve}
                 renderWidth={pageWidth}
               />

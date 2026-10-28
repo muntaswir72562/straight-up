@@ -8,6 +8,7 @@ import { naturalSortCompare } from '@/lib/naturalSort';
 import { validatePdf, loadPdfDocument } from '@/lib/pdf/render';
 import { runMergeOnlyPipeline, type PageAngleInfo, type PipelinePhase } from '@/lib/pipeline';
 import { runReplacePipeline } from '@/lib/replacePipeline';
+import { normalizeRotation } from '@/lib/pdf/rotate';
 import { clearThumbnailCache } from '@/lib/pdf/thumbnail';
 import { loadForExtraction, clearExtraction } from '@/lib/pdf/extractThumb';
 import { runFullfixPipeline } from '@/lib/fullfixPipeline';
@@ -77,6 +78,7 @@ export function BookScanTool() {
   const [replacements, setReplacements] = useState<Map<number, File>>(new Map());
   const [deletions, setDeletions] = useState<Set<number>>(new Set());
   const [insertions, setInsertions] = useState<Insertion[]>([]);
+  const [rotations, setRotations] = useState<Map<number, number>>(new Map());
   const [replacePdf, setReplacePdf] = useState<PDFDocumentProxy | null>(null);
   const [viewingPage, setViewingPage] = useState<number | null>(null);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -117,7 +119,7 @@ export function BookScanTool() {
 
   const canStartReplace =
     replaceFile !== null &&
-    (replacements.size > 0 || deletions.size > 0 || insertions.length > 0 || hasPageOrderChange) &&
+    (replacements.size > 0 || deletions.size > 0 || insertions.length > 0 || rotations.size > 0 || hasPageOrderChange) &&
     status === 'idle';
 
   const canStart =
@@ -149,6 +151,7 @@ export function BookScanTool() {
         setReplaceError(null);
         setReplaceIsValidating(false);
         setReplacements(new Map());
+        setRotations(new Map());
         setDeletions(new Set());
         setInsertions([]);
       }
@@ -456,6 +459,7 @@ export function BookScanTool() {
       }
       setReplacePdf(null);
       setReplacements(new Map());
+      setRotations(new Map());
       setDeletions(new Set());
       setInsertions([]);
       setPageOrder([]);
@@ -565,6 +569,25 @@ export function BookScanTool() {
       ...prev,
       { afterPage, file: memFile, id: crypto.randomUUID() },
     ]);
+  }, []);
+
+  // --- Replace mode: Rotate page (clockwise degrees; negative = counter-clockwise) ---
+  const handleRotate = useCallback((pageNumber: number, delta: number) => {
+    setRotations((prev) => {
+      const next = new Map(prev);
+      const rot = normalizeRotation((prev.get(pageNumber) ?? 0) + delta);
+      if (rot === 0) next.delete(pageNumber);
+      else next.set(pageNumber, rot);
+      return next;
+    });
+  }, []);
+
+  const handleRotateInsertion = useCallback((id: string, delta: number) => {
+    setInsertions((prev) =>
+      prev.map((ins) =>
+        ins.id === id ? { ...ins, rotation: normalizeRotation((ins.rotation ?? 0) + delta) } : ins,
+      ),
+    );
   }, []);
 
   const handleRemoveInsert = useCallback((id: string) => {
@@ -747,7 +770,7 @@ export function BookScanTool() {
         result = await runMergeOnlyPipeline(slots, bookName, progressCb, cancelRef.current);
       } else if (mode === 'replace') {
         const name = replaceFile!.name.replace(/\.pdf$/i, '');
-        result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, pageOrder, name, progressCb, cancelRef.current);
+        result = await runReplacePipeline(replaceFile!, replacements, deletions, insertions, pageOrder, rotations, name, progressCb, cancelRef.current);
       } else {
         // Full Book Fix: process queue sequentially
         const queue = fixFiles.length > 0
@@ -803,7 +826,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, downloadUrl, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
+  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, rotations, downloadUrl, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -836,6 +859,7 @@ export function BookScanTool() {
     setReplaceError(null);
     setReplaceIsValidating(false);
     setReplacements(new Map());
+    setRotations(new Map());
     setDeletions(new Set());
     setInsertions([]);
   }, [downloadUrl, replacePdf]);
@@ -871,8 +895,8 @@ export function BookScanTool() {
         startHint = 'Add a PDF file to get started.';
       } else if (replaceIsValidating) {
         startHint = 'Validating file...';
-      } else if (replacements.size === 0 && deletions.size === 0 && insertions.length === 0) {
-        startHint = 'Replace, delete, or insert pages to get started.';
+      } else if (replacements.size === 0 && deletions.size === 0 && insertions.length === 0 && rotations.size === 0) {
+        startHint = 'Replace, delete, insert, or rotate pages to get started.';
       }
     } else {
       if (!fullfixStraighten && !fullfixClean && !fullfixDewarp && !fullfixV2 && !fullfixOcr) {
@@ -1861,6 +1885,7 @@ export function BookScanTool() {
         replacements={replacements}
         deletions={deletions}
         insertions={insertions}
+        rotations={rotations}
         locked={locked}
         pageOrder={pageOrder}
         selectedPages={selectedPages}
@@ -1872,6 +1897,8 @@ export function BookScanTool() {
         onInsert={handleInsert}
         onRemoveInsert={handleRemoveInsert}
         onUpdateInsertionFile={handleUpdateInsertionFile}
+        onRotate={handleRotate}
+        onRotateInsertion={handleRotateInsertion}
         onToggleSelect={handleToggleSelect}
         onMoveTo={handleMoveTo}
         onClearSelection={handleClearSelection}
