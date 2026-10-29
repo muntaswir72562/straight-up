@@ -16,7 +16,8 @@ import type { ScanOptions, ScanSession, ScanCapture, ScanPageInfo } from '@/lib/
  */
 
 export function dataDir(): string {
-  return process.env.SCAN_DATA_DIR || join(process.cwd(), 'scan-data');
+  // runtime path, not a build input: keep the tracer from pulling in the whole project
+  return process.env.SCAN_DATA_DIR || join(/*turbopackIgnore: true*/ process.cwd(), 'scan-data');
 }
 
 const SESSION_ID = /^[0-9a-f-]{36}$/;
@@ -140,9 +141,9 @@ export async function createSession(bookName: string, options: Partial<ScanOptio
 
 export async function listSessions(): Promise<ScanSession[]> {
   const root = dataDir();
-  if (!existsSync(root)) return [];
+  if (!existsSync(/*turbopackIgnore: true*/ root)) return [];
   const out: ScanSession[] = [];
-  for (const name of await readdir(root)) {
+  for (const name of await readdir(/*turbopackIgnore: true*/ root)) {
     if (!isSessionId(name)) continue;
     const s = await readSession(name);
     if (s) out.push(s);

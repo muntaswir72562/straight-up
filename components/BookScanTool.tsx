@@ -21,8 +21,9 @@ import { ProgressPanel } from './ProgressPanel';
 import { ResultPanel } from './ResultPanel';
 import { PageViewModal } from './PageViewModal';
 import { FullscreenViewer } from './FullscreenViewer';
+import { ScanBook } from './scan/ScanBook';
 
-type ToolMode = 'merge' | 'fullfix' | 'replace';
+type ToolMode = 'merge' | 'fullfix' | 'replace' | 'scan';
 
 interface FixQueueEntry {
   id: string;
@@ -875,7 +876,9 @@ export function BookScanTool() {
       ? 'Merge your scanned book pages into one PDF'
       : mode === 'replace'
         ? 'Replace specific pages in an existing PDF'
-        : 'Straighten, clean, and dewarp your scanned book PDF';
+        : mode === 'scan'
+          ? 'Scan a book with the overhead camera into a searchable PDF'
+          : 'Straighten, clean, and dewarp your scanned book PDF';
 
   // --- Start button hint ---
   let startHint = '';
@@ -913,7 +916,7 @@ export function BookScanTool() {
     <>
     <main
       className="flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12"
-      style={{ maxWidth: '56rem' }}
+      style={{ maxWidth: mode === 'scan' ? '90rem' : '56rem' }}
     >
       {/* Header */}
       <header className="text-center mb-8 sm:mb-10">
@@ -951,6 +954,7 @@ export function BookScanTool() {
             { key: 'merge' as ToolMode, label: 'Merge' },
             { key: 'fullfix' as ToolMode, label: 'Full Book Fix' },
             { key: 'replace' as ToolMode, label: 'Replace Pages' },
+            { key: 'scan' as ToolMode, label: 'Scan Book' },
           ]).map((tab) => (
             <button
               key={tab.key}
@@ -981,7 +985,9 @@ export function BookScanTool() {
       )}
 
       {/* Input area — mode-dependent */}
-      {mode === 'merge' ? (
+      {mode === 'scan' ? (
+        <ScanBook />
+      ) : mode === 'merge' ? (
         <section className="mb-8 sm:mb-10">
           <div className="flex items-center justify-between mb-4">
             <h2
@@ -1676,7 +1682,7 @@ export function BookScanTool() {
       )}
 
       {/* Start button for non-fullfix modes */}
-      {mode !== 'fullfix' && status === 'idle' && !showStickyDownload && (
+      {mode !== 'fullfix' && mode !== 'scan' && status === 'idle' && !showStickyDownload && (
         <section className="flex flex-col items-center mb-8">
           <button
             type="button"
@@ -1716,7 +1722,7 @@ export function BookScanTool() {
       )}
 
       {/* Progress panel for non-fullfix modes */}
-      {mode !== 'fullfix' && status === 'processing' && (
+      {mode !== 'fullfix' && mode !== 'scan' && status === 'processing' && (
         <section className="mb-8">
           <ProgressPanel
             phase={progressPhase}
@@ -1728,7 +1734,7 @@ export function BookScanTool() {
       )}
 
       {/* Result panel for non-fullfix modes */}
-      {mode !== 'fullfix' && status === 'done' && (
+      {mode !== 'fullfix' && mode !== 'scan' && status === 'done' && (
         <section className="mb-8">
           {downloadUrl ? (
             <ResultPanel
@@ -1762,7 +1768,7 @@ export function BookScanTool() {
       )}
 
       {/* Error state for non-fullfix modes */}
-      {mode !== 'fullfix' && status === 'error' && (
+      {mode !== 'fullfix' && mode !== 'scan' && status === 'error' && (
         <section className="flex justify-center mb-8">
           <div
             className="w-full mx-auto p-6 flex flex-col items-center gap-4"
