@@ -28,7 +28,7 @@ import fitz
 
 from ocr.page import ocr_page
 
-RENDER_DPI = 200
+RENDER_DPI = 300
 
 
 def main():

@@ -41,7 +41,7 @@ except ImportError:
     sys.exit(1)
 
 # ── Constants ────────────────────────────────────────────────────────
-RENDER_DPI = 200
+RENDER_DPI = 300
 JPEG_QUALITY = 92
 BATCH_SIZE = 20  # pages per batch before flushing to disk
 

@@ -43,7 +43,7 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
     # on a page curving away from the camera only the left half of every
     # line was read. Dividing by the paper level (the same first step as
     # Clean, without its contrast stretch) leaves the letters as they are.
-    gray = _flatten_paper(gray)
+    gray = _flatten_paper(gray, render_dpi)
 
     # ── Layout analysis via scanner ─────────────────────────────────
     xh, lines_info, table_grid_boxes = _get_layout(gray)
@@ -64,6 +64,10 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
               f'dpi={dpi}  up={uw}x{uh}', file=sys.stderr)
     else:
         upscaled = gray
+        # not enlarged: positions are page pixels already, so they must not
+        # be divided by the scale (the text layer used to shrink by up to 1 %
+        # towards the top-left, drifting off the words on the last lines)
+        scale = 1.0
         print(f'[ocr] Page {page_num}: xh={xh:.1f}px  no upscale  dpi={dpi}',
               file=sys.stderr)
 
@@ -166,14 +170,16 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
 
 # ── Layout helpers ──────────────────────────────────────────────────
 
-def _flatten_paper(gray):
+def _flatten_paper(gray, render_dpi=200):
     """Divide the page by its paper level (large closing): white paper,
-    letters keep their contrast to the paper around them."""
+    letters keep their contrast to the paper around them. The kernel is
+    51 px at 200 dpi, scaled with render_dpi."""
     try:
+        k = int(round(51 * render_dpi / 200.0)) | 1
         bl = cv2.GaussianBlur(gray, (3, 3), 0)
         bg = cv2.morphologyEx(
             bl, cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51)))
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         return cv2.divide(gray, bg, scale=255)
     except Exception:
         return gray

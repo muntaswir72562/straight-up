@@ -43,26 +43,39 @@ except ImportError:
 
 
 # ── Constants ────────────────────────────────────────────────────────
-RENDER_DPI = 200
+RENDER_DPI = 300
+# Pixel sizes below were tuned at 200 dpi; _px() scales them so they cover
+# the same area of the page at RENDER_DPI.
+_PX = RENDER_DPI / 200.0
+
+
+def _px(v, odd=False):
+    """A 200-dpi pixel size at RENDER_DPI (odd=True: kernel sizes that must be odd)."""
+    n = int(round(v * _PX))
+    if odd and n % 2 == 0:
+        n += 1
+    return n
+
+
 DETECT_WIDTH = 1000
 BATCH_SIZE = 20
 MIN_LINE_WIDTH_RATIO = 0.12
 MIN_LINES = 3
-DILATION_H = 50
-DILATION_V = 3
-MIN_CURVATURE = 5.0        # median curvature threshold — only correct clearly visible warping
-MAX_CURVATURE = 15.0       # reject lines with curvature above this (likely bad fits)
-MAX_FIT_RESIDUAL = 4.0     # max RMS residual for accepted fit
+DILATION_H = _px(50)
+DILATION_V = _px(3)
+MIN_CURVATURE = 5.0 * _PX        # median curvature threshold — only correct clearly visible warping
+MAX_CURVATURE = 15.0 * _PX       # reject lines with curvature above this (likely bad fits)
+MAX_FIT_RESIDUAL = 4.0 * _PX     # max RMS residual for accepted fit
 DEWARP_DAMPING = 0.7       # scale displacement field to avoid overcorrection
 MARGIN_FRACTION = 0.03     # ignore this fraction at page edges
-BG_KERNEL_SIZE = 51        # morphological closing kernel for background
-BLUR_SIZE = 3              # Gaussian blur kernel
+BG_KERNEL_SIZE = _px(51, odd=True)        # morphological closing kernel for background
+BLUR_SIZE = _px(3, odd=True)              # Gaussian blur kernel
 JPEG_QUALITY = 90
 NO_PRINT_BLACK_PT = 170      # darkest print lighter than this = page without print (printed pages measure <= 132, blank backs >= 195)
 NO_PRINT_MARGIN = 15        # white point this far under the show-through level
 CLEAN_PAPER_BG = 248        # paper at least this white in the photo is already clean
 KEEP_INK_DARK = 110         # letter strokes: darker than this after paper normalisation
-KEEP_INK_RADIUS = 2         # pixels this close to a letter stroke keep their photo darkness
+KEEP_INK_RADIUS = _px(2)         # pixels this close to a letter stroke keep their photo darkness
 
 # Straighten (deskew) constants
 MAX_SKEW_ANGLE = 10.0      # max detectable skew (degrees)
