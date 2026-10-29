@@ -62,8 +62,10 @@ export function ScanPageViewer({
           </span>
         )}
         <div className="flex-1" />
-        <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={() => onOverride(p, { rotate: 90 })}>Rotate ⟳</button>
-        {info && (
+        {!p.rawDeleted && (
+          <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={() => onOverride(p, { rotate: 90 })}>Rotate ⟳</button>
+        )}
+        {info && !p.rawDeleted && (
           <button type="button" className="focus-ring px-3 py-1.5" style={btn}
             onClick={() => onOverride(p, { split: info.of > 1 ? 'one' : 'two' })}>
             {info.of > 1 ? 'Treat as one page' : 'Split into two'}
@@ -72,7 +74,12 @@ export function ScanPageViewer({
         <button type="button" className="focus-ring px-3 py-1.5" style={{ ...btn, color: 'var(--color-danger)' }} onClick={() => onDelete(p)}>Delete</button>
         <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={onClose} aria-label="Close">✕</button>
       </div>
-      {info && p.status === 'done' && (
+      {p.rawDeleted && (
+        <p className="px-4 pb-1 text-sm" style={{ color: '#ddd' }} onClick={(e) => e.stopPropagation()}>
+          This page was exported and its original photo removed to save space. To change it, close this and use Retake (📷) on the page.
+        </p>
+      )}
+      {info && p.status === 'done' && !p.rawDeleted && (
         <PageOptionsBar key={`${p.id}:${p.version}`} page={p} onApply={(o) => onOverride(p, o)} />
       )}
       {info?.warnings.map((w) => (

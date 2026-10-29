@@ -4,7 +4,7 @@ import { createReadStream, existsSync, statSync } from 'fs';
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { Readable } from 'stream';
-import { isSessionId, readSession, sessionDir, updateSession } from '@/lib/server/scanStore';
+import { deleteRawPhotos, isSessionId, readSession, sessionDir, updateSession } from '@/lib/server/scanStore';
 import { spawnPipeline } from '@/lib/server/python';
 import { sanitizeBookName } from '@/lib/filename';
 
@@ -14,6 +14,8 @@ import { sanitizeBookName } from '@/lib/filename';
  * GET  ?sessionId=…&download=pdf|txt|audit
  *
  * The export lives in <session>/export/ and is rebuilt on every export.
+ * After a successful export the raw photos of finished pages are deleted
+ * (deleteRawPhotos): those pages can then only be retaken, not re-processed.
  */
 
 const g = globalThis as unknown as { __scanExports?: Map<string, ChildProcess> };
@@ -51,7 +53,11 @@ export async function POST(req: NextRequest) {
     running.delete(id);
     console.log(`[api/scan/export] ${id} exited code=${code}`);
     if (code === 0) {
-      updateSession(id, (s) => { s.exportedAt = new Date().toISOString(); }).catch(() => {});
+      updateSession(id, (s) => { s.exportedAt = new Date().toISOString(); })
+        // the PDF is safe on disk: free the space the original photos take
+        .then(() => deleteRawPhotos(id))
+        .then((n) => console.log(`[api/scan/export] ${id}: deleted ${n} raw photo(s)`))
+        .catch((e) => console.error(`[api/scan/export] ${id}: cleanup failed`, e));
     } else {
       readFile(progress, 'utf8').then((raw) => {
         if (JSON.parse(raw).phase !== 'error') {

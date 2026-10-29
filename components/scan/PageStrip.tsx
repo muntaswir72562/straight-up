@@ -140,10 +140,10 @@ export function PageStrip({
             <div className="flex flex-wrap gap-1 p-1.5">
               {p.status === 'error' ? (
                 <IconButton label="Try again" onClick={() => onAction(p, 'retry')}>↻</IconButton>
-              ) : (
+              ) : !p.rawDeleted && (
                 <IconButton label="Rotate 90°" onClick={() => onAction(p, 'rotate')}>⟳</IconButton>
               )}
-              {!p.placeholder && (spreadHalf
+              {!p.placeholder && !p.rawDeleted && (spreadHalf
                 ? <IconButton label="Split wrongly: treat as one page" onClick={() => onAction(p, 'unsplit')}>▢</IconButton>
                 : <IconButton label="Split into two pages" onClick={() => onAction(p, 'split')}>◫</IconButton>)}
               <IconButton label={isTarget ? 'Cancel retake' : 'Retake: next scan replaces this page'} onClick={() => onAction(p, 'retake')}>

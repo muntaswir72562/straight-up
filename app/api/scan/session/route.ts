@@ -29,6 +29,7 @@ function view(s: ScanSession): ScanSessionView {
         removeFingers: pp.removeFingers ?? base.removeFingers,
         split: cap?.overrides?.split ?? base.split,
       },
+      rawDeleted: !!cap?.rawDeleted,
       version: cap?.doneAt ?? '0',
     };
   });

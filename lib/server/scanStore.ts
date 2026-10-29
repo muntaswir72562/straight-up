@@ -155,6 +155,25 @@ export async function deleteSession(id: string): Promise<void> {
   await withLock(id, () => rm(sessionDir(id), { recursive: true, force: true }));
 }
 
+/**
+ * After a successful export: delete the raw photos of the finished captures
+ * (about 80 % of a book's size). Pages, OCR and the PDF stay. Captures that
+ * failed or are waiting keep their photo, so they can still be retried.
+ * Returns the number of photos deleted.
+ */
+export async function deleteRawPhotos(id: string): Promise<number> {
+  let n = 0;
+  await updateSession(id, async (s) => {
+    for (const c of Object.values(s.captures)) {
+      if (c.status !== 'done' || c.rawDeleted) continue;
+      await rm(rawPath(id, c.no), { force: true });
+      c.rawDeleted = true;
+      n++;
+    }
+  });
+  return n;
+}
+
 /** Pages of a finished capture go where its placeholder / old pages were. */
 export function placePages(s: ScanSession, cap: ScanCapture, ids: string[], infos: Record<string, ScanPageInfo>) {
   const ph = placeholder(cap.no);

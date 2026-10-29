@@ -42,6 +42,9 @@ export async function POST(req: NextRequest) {
     await updateSession(b.sessionId, (s) => {
       const c = s.captures[no];
       if (!c) throw new Error('Capture not found');
+      if (c.rawDeleted) {
+        throw new Error('The original photo was removed after export to save space. Retake this page to change it.');
+      }
       const idx = String(s.pages[pageId]?.index ?? 1);
       const o = c.overrides;
       if (b.action !== 'retry') {

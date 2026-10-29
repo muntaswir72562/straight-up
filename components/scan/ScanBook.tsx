@@ -260,7 +260,7 @@ export function ScanBook() {
   const onDelete = (p: ScanPageView) => {
     if (!session) return;
     const i = session.pages.findIndex((x) => x.id === p.id);
-    if (!window.confirm(`Delete page ${i + 1}? The original photo is kept on disk.`)) return;
+    if (!window.confirm(`Delete page ${i + 1}?`)) return;
     if (retakeTarget === p.id) setRetakeTarget(null);
     act(() => deletePage(session.id, p.id));
   };
@@ -481,6 +481,11 @@ export function ScanBook() {
                 : 'Export searchable PDF'}
             </button>
             {exportHint && <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>{exportHint}</p>}
+            {canExport && (
+              <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                After export the original photos are deleted to save space; exported pages can then be retaken, not re-processed.
+              </p>
+            )}
             {session?.exportedAt && !exporting && (
               <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
                 Last exported {new Date(session.exportedAt).toLocaleString()} ·{' '}

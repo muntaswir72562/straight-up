@@ -41,6 +41,8 @@ export interface ScanCapture {
   pages: string[];
   /** Page ids the user deleted (not re-added when the capture is reprocessed). */
   deleted?: string[];
+  /** The raw photo was deleted after an export (to save space): the page can't be re-processed, only retaken. */
+  rawDeleted?: boolean;
 }
 
 export interface ScanPageInfo {
@@ -78,6 +80,8 @@ export interface ScanPageView {
   stage?: string;
   error?: string;
   info?: ScanPageInfo;
+  /** original photo removed after export: no rotate / split / option changes, only retake */
+  rawDeleted: boolean;
   /** the options this page is processed with */
   options: PageOptions & { split: SplitMode };
   /** changes when the page image changes (cache-busting for <img>) */
