@@ -56,7 +56,7 @@ node desktop/scripts/prepare-server.js
 pip install -r scripts/requirements.txt pyinstaller
 cd desktop
 pyinstaller engine.spec --noconfirm --distpath resources --workpath ../build/pyi
-powershell -ExecutionPolicy Bypass -File scripts/fetch-tesseract.ps1   # needs admin for the silent install
+powershell -ExecutionPolicy Bypass -File scripts/fetch-tesseract.ps1   # unpacks the UB Mannheim installer with 7-Zip
 
 npm ci
 npm start                 # run the app from this folder (uses desktop/resources)
