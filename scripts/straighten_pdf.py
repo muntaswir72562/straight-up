@@ -32,7 +32,7 @@ except ImportError:
 
 
 # ── Constants ────────────────────────────────────────────────────────
-RENDER_DPI = 200
+RENDER_DPI = 300
 DETECT_WIDTH = 1000
 JPEG_QUALITY = 92
 BATCH_SIZE = 20
