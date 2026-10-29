@@ -37,6 +37,14 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
     """
     H, W = gray.shape[:2]
 
+    # Even out the paper shading first. OCR reads the page before Clean
+    # (Full Book Fix saves it for OCR), so a photo that gets darker towards
+    # one side reached Tesseract as is, and it gave up on the dark part:
+    # on a page curving away from the camera only the left half of every
+    # line was read. Dividing by the paper level (the same first step as
+    # Clean, without its contrast stretch) leaves the letters as they are.
+    gray = _flatten_paper(gray)
+
     # ── Layout analysis via scanner ─────────────────────────────────
     xh, lines_info, table_grid_boxes = _get_layout(gray)
 
@@ -76,6 +84,15 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
         print(f'[ocr] Page {page_num}: tesseract failed: {exc}',
               file=sys.stderr)
         words = []
+
+    # Tesseract's single-column mode (psm 4) skips parts of pages laid out
+    # in columns: contents pages and tables of statutes with dot leaders
+    # lose their right-hand paragraph numbers, or whole halves of the page.
+    # When it read clearly fewer letters than the page has, read the page in
+    # two other modes and ADD the words they find where nothing was read.
+    # What psm 4 read is kept as it is.
+    words = _fill_missed_text(upscaled, words, xh * scale, scale, lang, dpi,
+                              page_num)
 
     del upscaled
 
@@ -148,6 +165,96 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
 
 
 # ── Layout helpers ──────────────────────────────────────────────────
+
+def _flatten_paper(gray):
+    """Divide the page by its paper level (large closing): white paper,
+    letters keep their contrast to the paper around them."""
+    try:
+        bl = cv2.GaussianBlur(gray, (3, 3), 0)
+        bg = cv2.morphologyEx(
+            bl, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51)))
+        return cv2.divide(gray, bg, scale=255)
+    except Exception:
+        return gray
+
+
+# ── Text psm 4 missed ───────────────────────────────────────────────
+
+FILL_MIN_LETTERS = 150       # pages with fewer letters are left alone
+FILL_MAX_COVERAGE = 0.95     # psm 4 normally covers >= 0.97 of the letters
+FILL_MIN_CONF = 60           # an added word must be read this clearly
+FILL_PSMS = (6, 11)          # uniform block, then sparse text
+
+
+def _letter_centres(img, xh):
+    """Centres of the letter-sized ink blobs of the page (image pixels)."""
+    bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    _, _, st, cen = cv2.connectedComponentsWithStats(bw, 8)
+    hh, ww = st[1:, 3], st[1:, 2]
+    keep = (hh > 0.4 * xh) & (hh < 3 * xh) & (ww < 4 * xh)
+    return cen[1:][keep]
+
+
+def _inside(cen, bbox, pad=2):
+    x, y, w, h = bbox
+    return ((cen[:, 0] >= x - pad) & (cen[:, 0] <= x + w + pad)
+            & (cen[:, 1] >= y - pad) & (cen[:, 1] <= y + h + pad))
+
+
+def _overlap_frac(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    return (ix * iy) / float(max(1, min(aw * ah, bw * bh)))
+
+
+def _fill_missed_text(upscaled, words, xh_up, scale, lang, dpi, page_num):
+    try:
+        cen = _letter_centres(upscaled, xh_up) / float(scale)   # page pixels
+        if len(cen) < FILL_MIN_LETTERS:
+            return words
+        covered = np.zeros(len(cen), bool)
+        for w in words:
+            if w['text'].strip():
+                covered |= _inside(cen, w['bbox'])
+        before = covered.mean()
+        if before >= FILL_MAX_COVERAGE:
+            return words
+        kept = [w for w in words if w['text'].strip()]
+        added = []
+        for psm in FILL_PSMS:
+            extra = extract_words(
+                run_tesseract(upscaled, lang=lang, psm=psm, dpi=dpi), scale=scale)
+            for w in extra:
+                t = w['text'].strip()
+                if (w['conf'] < FILL_MIN_CONF or not t
+                        or not any(ch.isalnum() for ch in t)):
+                    continue
+                ins = _inside(cen, w['bbox'])
+                if not (ins & ~covered).any():
+                    continue        # nothing new under this word
+                if any(_overlap_frac(w['bbox'], k['bbox']) > 0.3
+                       for k in kept):
+                    continue        # already read there
+                w = dict(w)
+                # keep the line grouping of this pass apart from psm 4's
+                w['block_num'] = w['block_num'] + 1000 * psm
+                kept.append(w)
+                added.append(w)
+                covered |= ins
+            if covered.mean() >= FILL_MAX_COVERAGE:
+                break
+        if added:
+            print(f'[ocr] Page {page_num}: psm 4 covered {before:.0%} of the '
+                  f'letters; added {len(added)} words from other modes '
+                  f'({covered.mean():.0%})', file=sys.stderr)
+            return words + added
+    except Exception as exc:     # never lose the first reading
+        print(f'[ocr] Page {page_num}: fill-in failed: {exc}', file=sys.stderr)
+    return words
+
 
 def _get_layout(gray):
     """
