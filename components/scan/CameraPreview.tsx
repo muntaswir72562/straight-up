@@ -44,7 +44,7 @@ function errorMessage(e: unknown): string {
   return `Could not start the camera: ${(e as Error)?.message || String(e)}`;
 }
 
-/** Camera picker, then `children` (options, Scan button), then the live preview. */
+/** Camera picker, then `children` (options, Scan button), then the live preview filling the rest. */
 export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHandle>; flashKey: number; children?: ReactNode }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -157,7 +157,7 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
   };
 
   return (
-    <div>
+    <div className="flex flex-col h-full min-h-0">
       <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--color-ink-muted)' }}>
         <label className="flex items-center gap-2">
           Camera
@@ -184,20 +184,15 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       </div>
       {children}
       <div
-        className="relative w-full overflow-hidden"
-        style={{
-          background: '#111',
-          borderRadius: 'var(--radius-lg)',
-          aspectRatio: state.kind === 'live' && state.width && state.height ? `${state.width} / ${state.height}` : '4 / 3',
-          maxHeight: '62vh',
-          margin: '0 auto',
-        }}
+        // fills the height left in the column (the whole frame is shown, letterboxed)
+        className="relative w-full flex-1 overflow-hidden min-h-[45vh] lg:min-h-0"
+        style={{ background: '#111', borderRadius: 'var(--radius-lg)' }}
       >
         <video
           ref={videoRef}
           muted
           playsInline
-          className="w-full h-full"
+          className="absolute inset-0 w-full h-full"
           style={{ objectFit: 'contain', display: state.kind === 'live' ? 'block' : 'none' }}
         />
         {state.kind === 'starting' && (

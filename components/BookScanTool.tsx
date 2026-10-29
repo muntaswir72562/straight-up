@@ -915,17 +915,22 @@ export function BookScanTool() {
   return (
     <>
     <main
-      className="flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12"
-      style={{ maxWidth: mode === 'scan' ? '90rem' : '56rem' }}
+      className={mode === 'scan'
+        // Scan Book fills the window exactly (only its page strip scrolls)
+        ? 'flex-1 w-full mx-auto px-4 sm:px-6 py-3 flex flex-col lg:h-dvh lg:overflow-hidden'
+        : 'flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12'}
+      style={{ maxWidth: mode === 'scan' ? '96rem' : '56rem' }}
     >
+      <div className={mode === 'scan' ? 'flex flex-wrap items-center justify-between gap-3 mb-3' : ''}>
       {/* Header */}
-      <header className="text-center mb-8 sm:mb-10">
+      <header className={mode === 'scan' ? '' : 'text-center mb-8 sm:mb-10'}>
         <h1
-          className="text-4xl sm:text-5xl font-bold tracking-tight"
+          className={mode === 'scan' ? 'text-2xl font-bold tracking-tight' : 'text-4xl sm:text-5xl font-bold tracking-tight'}
           style={{ color: 'var(--color-ink)' }}
         >
           Straight Up
         </h1>
+        {mode !== 'scan' && (<>
         <p
           className="mt-3 text-base sm:text-lg"
           style={{ color: 'var(--color-ink-muted)' }}
@@ -938,10 +943,11 @@ export function BookScanTool() {
         >
           Everything happens in your browser — no files are uploaded anywhere.
         </p>
+        </>)}
       </header>
 
       {/* Mode tabs */}
-      <section className="flex justify-center mb-8 sm:mb-10">
+      <section className={mode === 'scan' ? 'flex' : 'flex justify-center mb-8 sm:mb-10'}>
         <div
           className="inline-flex p-1"
           style={{
@@ -962,7 +968,7 @@ export function BookScanTool() {
               type="button"
               onClick={() => handleModeChange(tab.key)}
               disabled={locked}
-              className="focus-ring px-5 py-2 text-sm font-medium transition-all"
+              className={`focus-ring ${mode === 'scan' ? 'px-4 py-1.5' : 'px-5 py-2'} text-sm font-medium transition-all`}
               style={{
                 background: mode === tab.key ? 'var(--color-primary)' : 'transparent',
                 color: mode === tab.key ? '#ffffff' : 'var(--color-ink-muted)',
@@ -977,6 +983,7 @@ export function BookScanTool() {
           ))}
         </div>
       </section>
+      </div>
 
       {/* Book name input (only shown in merge mode) */}
       {mode === 'merge' && (

@@ -6,7 +6,6 @@ import {
   createSession, deletePage, exportProgress, exportUrl, getSession, listSessions,
   overridePage, patchSession, retryPage, startExport, uploadCapture, type PageOverride,
 } from '@/lib/scanClient';
-import { BookNameInput } from '../BookNameInput';
 import { CameraPreview, type CameraHandle } from './CameraPreview';
 import { ScanOptionsPanel } from './ScanOptionsPanel';
 import { PageStrip, type PageAction } from './PageStrip';
@@ -327,13 +326,28 @@ export function ScanBook() {
   const pageCount = pages.filter((p) => !p.placeholder).length;
   const others = sessions.filter((s) => s.id !== session?.id);
 
+  // One window tall on laptop screens (lg+): only the page strip scrolls.
   return (
-    <>
-      <section className="flex flex-wrap items-end gap-x-6 gap-y-3 mb-3">
-        <div className="flex-1" style={{ minWidth: '16rem', maxWidth: '28rem' }}>
-          <BookNameInput value={bookName} onChange={setBookName} disabled={false} />
-        </div>
-        <div className="text-sm pb-3" style={{ color: 'var(--color-ink-muted)' }}>
+    <div className="flex flex-col flex-1 min-h-0 gap-2">
+      {/* top bar: book, counts, switching */}
+      <section className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <label className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--color-ink)' }}>
+          Book name
+          <input
+            type="text"
+            value={bookName}
+            onChange={(e) => setBookName(e.target.value)}
+            placeholder="e.g. Criminal Law of Mauritius"
+            autoComplete="off"
+            className="focus-ring px-3 py-1.5 text-sm"
+            style={{
+              width: '18rem', maxWidth: '60vw',
+              background: 'var(--color-surface-inset)', border: '1.5px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)', color: 'var(--color-ink)',
+            }}
+          />
+        </label>
+        <div className="text-sm" style={{ color: 'var(--color-ink-muted)' }}>
           {session ? (
             <>
               <b style={{ color: 'var(--color-ink)' }}>{pageCount}</b> page{pageCount === 1 ? '' : 's'}
@@ -350,36 +364,35 @@ export function ScanBook() {
             </>
           ) : 'New book: the first scan starts it'}
         </div>
-        <div className="flex items-center gap-2 pb-2">
-          {others.length > 0 && (
-            <select
-              value=""
-              onChange={(e) => { if (e.target.value) open(e.target.value); }}
-              aria-label="Open another scan"
-              className="focus-ring px-2 py-2 text-sm"
-              style={{ background: 'var(--color-surface-inset)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-ink)', maxWidth: '16rem' }}
-              onFocus={() => { loadSessions(); }}
-            >
-              <option value="">Open another scan…</option>
-              {others.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.bookName} ({s.pageCount} pages{s.exportedAt ? ', exported' : ''}) · {new Date(s.updatedAt).toLocaleDateString()}
-                </option>
-              ))}
-            </select>
-          )}
-          {session && (
-            <button type="button" className="focus-ring px-4 py-2 text-sm font-medium" style={secondaryBtn} onClick={newBook}>
-              New book
-            </button>
-          )}
-        </div>
+        <div className="flex-1" />
+        {others.length > 0 && (
+          <select
+            value=""
+            onChange={(e) => { if (e.target.value) open(e.target.value); }}
+            aria-label="Open another scan"
+            className="focus-ring px-2 py-1.5 text-sm"
+            style={{ background: 'var(--color-surface-inset)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-ink)', maxWidth: '16rem' }}
+            onFocus={() => { loadSessions(); }}
+          >
+            <option value="">Open another scan…</option>
+            {others.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.bookName} ({s.pageCount} pages{s.exportedAt ? ', exported' : ''}) · {new Date(s.updatedAt).toLocaleDateString()}
+              </option>
+            ))}
+          </select>
+        )}
+        {session && (
+          <button type="button" className="focus-ring px-3 py-1.5 text-sm font-medium" style={secondaryBtn} onClick={newBook}>
+            New book
+          </button>
+        )}
       </section>
 
       {resumeOffer && !session && (
         <div
-          className="mb-3 px-4 py-3 flex flex-wrap items-center gap-3 text-sm"
-          style={{ ...card, background: 'var(--color-primary-subtle)', borderColor: 'var(--color-primary)' }}
+          className="px-3 py-2 flex flex-wrap items-center gap-3 text-sm"
+          style={{ ...card, borderRadius: 'var(--radius-md)', background: 'var(--color-primary-subtle)', borderColor: 'var(--color-primary)' }}
         >
           <span style={{ color: 'var(--color-ink)' }}>
             Unfinished scan: <b>{resumeOffer.bookName}</b> ({resumeOffer.pageCount} page{resumeOffer.pageCount === 1 ? '' : 's'}
@@ -388,20 +401,20 @@ export function ScanBook() {
           <button
             type="button"
             onClick={() => open(resumeOffer.id)}
-            className="focus-ring px-4 py-1.5 text-sm font-semibold"
+            className="focus-ring px-3 py-1 text-sm font-semibold"
             style={{ background: 'var(--color-primary)', color: '#fff', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}
           >
             Resume
           </button>
-          <button type="button" onClick={() => setResumeOffer(null)} className="focus-ring px-4 py-1.5 text-sm font-medium" style={secondaryBtn}>
+          <button type="button" onClick={() => setResumeOffer(null)} className="focus-ring px-3 py-1 text-sm font-medium" style={secondaryBtn}>
             Start new
           </button>
         </div>
       )}
 
-      {error && <div className="mb-3"><ErrorBox message={error} onClose={() => setError(null)} /></div>}
+      {error && <ErrorBox message={error} onClose={() => setError(null)} />}
       {failed.length > 0 && (
-        <div className="mb-3 p-3 text-sm flex flex-wrap items-center gap-3" style={{ ...card, borderColor: 'var(--color-danger)', background: 'var(--color-danger-subtle)' }} role="alert">
+        <div className="px-3 py-2 text-sm flex flex-wrap items-center gap-3" style={{ ...card, borderRadius: 'var(--radius-md)', borderColor: 'var(--color-danger)', background: 'var(--color-danger-subtle)' }} role="alert">
           <span style={{ color: 'var(--color-danger)' }}>
             {failed.length} photo{failed.length === 1 ? '' : 's'} could not be saved ({failed[0].error}).
           </span>
@@ -416,18 +429,21 @@ export function ScanBook() {
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)]">
-        <div className="flex flex-col gap-3 min-w-0">
+      <div className="grid gap-4 flex-1 min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] lg:grid-rows-[minmax(0,1fr)]">
+        {/* left: camera picker, options + Scan, live preview (fills the rest) */}
+        <div className="flex flex-col min-h-0 min-w-0">
           <CameraPreview ref={cameraRef} flashKey={flashKey}>
-            <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} />
-            <div className="my-3 flex flex-wrap items-center gap-3">
+            <div className="mb-2 flex flex-wrap items-stretch gap-2">
+              <div className="flex-1" style={{ minWidth: '20rem' }}>
+                <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} />
+              </div>
               <button
                 type="button"
                 onClick={scan}
                 onKeyDown={(e) => { if (e.key === ' ') e.preventDefault(); }}
-                className="focus-ring flex-1 px-8 py-4 text-xl font-bold"
+                className="focus-ring px-8 py-2 text-xl font-bold"
                 style={{
-                  minWidth: '14rem',
+                  minWidth: '12rem',
                   background: retakeTarget ? 'var(--color-accent)' : 'var(--color-primary)',
                   color: '#fff', border: 'none', borderRadius: 'var(--radius-lg)', cursor: 'pointer', boxShadow: 'var(--shadow-md)',
                 }}
@@ -438,7 +454,7 @@ export function ScanBook() {
                 <span className="ml-2 text-sm font-medium" style={{ opacity: 0.8 }}>(Space)</span>
               </button>
               {retakeTarget && (
-                <button type="button" className="focus-ring px-4 py-3 text-sm font-medium" style={secondaryBtn} onClick={() => setRetakeTarget(null)}>
+                <button type="button" className="focus-ring px-3 text-sm font-medium" style={secondaryBtn} onClick={() => setRetakeTarget(null)}>
                   Cancel retake
                 </button>
               )}
@@ -446,25 +462,24 @@ export function ScanBook() {
           </CameraPreview>
         </div>
 
-        <div className="flex flex-col gap-3 min-w-0">
-          <div className="p-3 flex flex-col gap-2" style={card}>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={runExport}
-                disabled={!canExport}
-                className="focus-ring flex-1 px-4 py-2.5 text-sm font-semibold"
-                style={{
-                  background: canExport ? 'var(--color-primary)' : 'var(--color-border)',
-                  color: canExport ? '#fff' : 'var(--color-ink-subtle)',
-                  border: 'none', borderRadius: 'var(--radius-md)', cursor: canExport ? 'pointer' : 'not-allowed',
-                }}
-              >
-                {exporting
-                  ? exporting.total ? `Building PDF… ${exporting.current}/${exporting.total}` : 'Building PDF…'
-                  : 'Export searchable PDF'}
-              </button>
-            </div>
+        {/* right: export, then the page strip (the only part that scrolls) */}
+        <div className="flex flex-col min-h-0 min-w-0 gap-2">
+          <div className="px-3 py-2 flex flex-col gap-1" style={{ ...card, borderRadius: 'var(--radius-md)' }}>
+            <button
+              type="button"
+              onClick={runExport}
+              disabled={!canExport}
+              className="focus-ring w-full px-4 py-2 text-sm font-semibold"
+              style={{
+                background: canExport ? 'var(--color-primary)' : 'var(--color-border)',
+                color: canExport ? '#fff' : 'var(--color-ink-subtle)',
+                border: 'none', borderRadius: 'var(--radius-md)', cursor: canExport ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {exporting
+                ? exporting.total ? `Building PDF… ${exporting.current}/${exporting.total}` : 'Building PDF…'
+                : 'Export searchable PDF'}
+            </button>
             {exportHint && <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>{exportHint}</p>}
             {session?.exportedAt && !exporting && (
               <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
@@ -473,7 +488,7 @@ export function ScanBook() {
               </p>
             )}
           </div>
-          <div className="overflow-y-auto p-2" style={{ ...card, maxHeight: 'calc(100vh - 14rem)', minHeight: '16rem' }}>
+          <div className="flex-1 min-h-0 overflow-y-auto p-2 max-lg:max-h-[70vh]" style={{ ...card, borderRadius: 'var(--radius-md)' }}>
             <PageStrip
               sessionId={session?.id ?? ''}
               pages={pages}
@@ -497,7 +512,7 @@ export function ScanBook() {
           onDelete={(p) => { setViewer(null); onDelete(p); }}
         />
       )}
-    </>
+    </div>
   );
 }
 
