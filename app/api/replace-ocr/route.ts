@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawnPipeline } from '@/lib/server/python';
+import type { ChildProcess } from 'child_process';
 import { writeFile, readFile, mkdir, rm } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { Readable } from 'stream';
@@ -27,14 +28,13 @@ function spawnPython(jobId: string, job: Job): void {
   const inputPath = join(job.tempDir, 'input.pdf');
   const outputPath = join(job.tempDir, 'output.pdf');
   const progressPath = join(job.tempDir, 'progress.json');
-  const scriptPath = join(process.cwd(), 'scripts', 'replace_ocr.py');
 
-  const args = [scriptPath, inputPath, outputPath, progressPath, job.ocrPages];
+  const args = [inputPath, outputPath, progressPath, job.ocrPages];
   if (job.fixPages) {
     args.push(job.fixPages);
   }
 
-  const py = spawn('python', args, {
+  const py = spawnPipeline('replace-ocr', args, {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 

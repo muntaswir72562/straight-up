@@ -56,6 +56,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/scripts/straighten_pdf.py ./scripts/
 COPY --from=builder /app/scripts/clean_pdf.py ./scripts/
 COPY --from=builder /app/scripts/fullfix_pdf.py ./scripts/
+COPY --from=builder /app/scripts/pdf_out.py ./scripts/
+COPY --from=builder /app/scripts/scan_worker.py ./scripts/
+COPY --from=builder /app/scripts/scan_export.py ./scripts/
 COPY --from=builder /app/scripts/scanner/ ./scripts/scanner/
 COPY --from=builder /app/scripts/ocr/ ./scripts/ocr/
 

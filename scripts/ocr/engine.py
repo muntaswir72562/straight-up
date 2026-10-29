@@ -22,6 +22,12 @@ def _find_tesseract():
     if _TESSERACT_BIN is not None:
         return _TESSERACT_BIN
 
+    # Explicit path first (the desktop app bundles its own Tesseract)
+    env_cmd = os.environ.get('TESSERACT_CMD')
+    if env_cmd and os.path.isfile(env_cmd):
+        _TESSERACT_BIN = env_cmd
+        return env_cmd
+
     found = shutil.which('tesseract')
     if found:
         _TESSERACT_BIN = found

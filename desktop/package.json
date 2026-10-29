@@ -1,0 +1,82 @@
+{
+  "name": "straight-up-desktop",
+  "productName": "Straight Up",
+  "version": "0.1.0",
+  "description": "Straight Up desktop app (Windows)",
+  "private": true,
+  "main": "main.js",
+  "author": "Straight Up",
+  "scripts": {
+    "prepare-server": "node scripts/prepare-server.js",
+    "start": "electron .",
+    "dist": "electron-builder --win --x64 --publish never"
+  },
+  "build": {
+    "appId": "com.straightup.desktop",
+    "productName": "Straight Up",
+    "copyright": "Straight Up",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "splash.html",
+      "package.json",
+      "build/icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/server",
+        "to": "server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/engine",
+        "to": "engine",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/tesseract",
+        "to": "tesseract",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "executableName": "StraightUp"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Straight Up",
+      "uninstallDisplayName": "Straight Up",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "artifactName": "StraightUp-Setup.exe"
+    },
+    "afterPack": "scripts/after-pack.js"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
+  }
+}

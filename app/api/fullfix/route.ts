@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawnPipeline } from '@/lib/server/python';
+import type { ChildProcess } from 'child_process';
 import { writeFile, readFile, mkdir, rm } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { Readable } from 'stream';
@@ -42,10 +43,9 @@ function spawnPython(jobId: string, job: Job): void {
   const inputPath = join(job.tempDir, 'input.pdf');
   const outputPath = join(job.tempDir, 'output.pdf');
   const progressPath = join(job.tempDir, 'progress.json');
-  const scriptPath = join(process.cwd(), 'scripts', 'fullfix_pdf.py');
 
-  const py = spawn('python', [
-    scriptPath, inputPath, outputPath, progressPath,
+  const py = spawnPipeline('fullfix', [
+    inputPath, outputPath, progressPath,
     meta.bookName, meta.straighten, meta.clean, meta.dewarp, meta.v2,
     meta.skipClean, meta.ocr, meta.skipStraighten, meta.skipDewarp, meta.audit,
   ], {

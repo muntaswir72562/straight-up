@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
+import { spawnPipeline } from '@/lib/server/python';
 import { writeFile, readFile, mkdir, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -29,11 +29,10 @@ export async function POST(req: NextRequest) {
   await writeFile(imagePath, imageBuffer);
   await writeFile(maskPath, maskBuffer);
 
-  const scriptPath = join(process.cwd(), 'scripts', 'inpaint.py');
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const py = spawn('python', [scriptPath, imagePath, maskPath, outputPath, String(radius)], {
+      const py = spawnPipeline('inpaint', [imagePath, maskPath, outputPath, String(radius)], {
         stdio: ['ignore', 'ignore', 'pipe'],
       });
 

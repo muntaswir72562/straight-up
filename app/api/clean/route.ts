@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawnPipeline } from '@/lib/server/python';
+import type { ChildProcess } from 'child_process';
 import { writeFile, readFile, mkdir, rm } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { Readable } from 'stream';
@@ -48,8 +49,7 @@ export async function POST(req: NextRequest) {
   await pipeline(nodeStream, createWriteStream(inputPath));
 
   // Spawn Python
-  const scriptPath = join(process.cwd(), 'scripts', 'clean_pdf.py');
-  const py = spawn('python', [scriptPath, inputPath, outputPath, progressPath, bookName], {
+  const py = spawnPipeline('clean', [inputPath, outputPath, progressPath, bookName], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 

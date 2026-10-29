@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Electron shell: own package, build output and bundled resources
+    "desktop/**",
   ]),
 ]);
 
