@@ -45,19 +45,28 @@ export async function POST(req: NextRequest) {
       const idx = String(s.pages[pageId]?.index ?? 1);
       const o = c.overrides;
       if (b.action !== 'retry') {
-        if (b.split === 'auto' || b.split === 'one' || b.split === 'two') {
+        if ((b.split === 'auto' || b.split === 'one' || b.split === 'two') && b.split !== (o.split ?? c.options.split)) {
           o.split = b.split;
           c.deleted = [];          // page ids change with the split
           o.rotate = {};
           o.keepColour = {};
+          o.pages = {};
         }
         if (typeof b.rotate === 'number' && b.rotate % 90 === 0) {
           o.rotate = { ...(o.rotate ?? {}), [idx]: ((((o.rotate?.[idx] ?? 0) + b.rotate) % 360) + 360) % 360 };
         }
         if (typeof b.keepColour === 'boolean') o.keepColour = { ...(o.keepColour ?? {}), [idx]: b.keepColour };
-        if (b.colorMode === 'clean' || b.colorMode === 'colour') o.colorMode = b.colorMode;
-        if (typeof b.dewarp === 'boolean') o.dewarp = b.dewarp;
-        if (typeof b.removeFingers === 'boolean') o.removeFingers = b.removeFingers;
+        // Colour/Clean, Dewarp and Remove fingers belong to this page only
+        const page = { ...(o.pages?.[idx] ?? {}) };
+        if (b.colorMode === 'clean' || b.colorMode === 'colour') {
+          page.colorMode = b.colorMode;
+          // "Clean" on a page Clean mode kept in colour (cover detection) means clean it
+          if (b.colorMode === 'clean' && typeof b.keepColour !== 'boolean') o.keepColour = { ...(o.keepColour ?? {}), [idx]: false };
+          if (b.colorMode === 'colour' && o.keepColour) delete o.keepColour[idx];
+        }
+        if (typeof b.dewarp === 'boolean') page.dewarp = b.dewarp;
+        if (typeof b.removeFingers === 'boolean') page.removeFingers = b.removeFingers;
+        o.pages = { ...(o.pages ?? {}), [idx]: page };
       }
       c.status = 'queued';
       c.error = undefined;

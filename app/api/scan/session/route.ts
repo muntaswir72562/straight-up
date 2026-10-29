@@ -12,6 +12,9 @@ function view(s: ScanSession): ScanSessionView {
     const isPh = id.startsWith('c');
     const capNo = parseInt(isPh ? id.slice(1) : id.split('_')[0], 10);
     const cap = s.captures[capNo];
+    const idx = String(isPh ? 1 : s.pages[id]?.index ?? parseInt(id.split('_')[1], 10));
+    const base = cap?.options ?? s.options;
+    const pp = cap?.overrides?.pages?.[idx] ?? {};
     return {
       id,
       capture: capNo,
@@ -20,6 +23,12 @@ function view(s: ScanSession): ScanSessionView {
       stage: cap ? scanWorker.stage(s.id, capNo) : undefined,
       error: cap?.error,
       info: isPh ? undefined : s.pages[id],
+      options: {
+        colorMode: pp.colorMode ?? base.colorMode,
+        dewarp: pp.dewarp ?? base.dewarp,
+        removeFingers: pp.removeFingers ?? base.removeFingers,
+        split: cap?.overrides?.split ?? base.split,
+      },
       version: cap?.doneAt ?? '0',
     };
   });

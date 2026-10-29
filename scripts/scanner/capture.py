@@ -30,6 +30,9 @@ JPEG_QUALITY = 92
 THUMB_W = 320         # page strip thumbnails
 
 
+PAGE_KEYS = ("color_mode", "dewarp", "remove_fingers")
+
+
 @dataclass
 class Options:
     color_mode: str = "clean"        # "clean" | "colour"
@@ -39,6 +42,8 @@ class Options:
     # per-page overrides, keyed by the page index within the capture (1, 2)
     rotate: dict = field(default_factory=dict)        # {idx: 0|90|180|270}
     keep_colour: dict = field(default_factory=dict)   # {idx: True|False}
+    # per-page options, override the ones above for that page: {idx: {"color_mode", "dewarp", "remove_fingers"}}
+    per_page: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Options":
@@ -46,7 +51,14 @@ class Options:
         o = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
         o.rotate = {int(k): int(v) for k, v in (o.rotate or {}).items()}
         o.keep_colour = {int(k): bool(v) for k, v in (o.keep_colour or {}).items()}
+        o.per_page = {int(k): {kk: vv for kk, vv in (v or {}).items() if kk in PAGE_KEYS}
+                      for k, v in (o.per_page or {}).items()}
         return o
+
+    def for_page(self, idx: int) -> "Options":
+        """These options with page idx's own settings applied."""
+        pp = self.per_page.get(idx, {})
+        return Options(**{**asdict(self), **pp})
 
 
 @dataclass
@@ -405,6 +417,7 @@ def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=N
             progress(f"{name} ({label})")
 
     warnings = []
+    opts = opts.for_page(idx)
     bgr = _rotate(bgr, opts.rotate.get(idx, 0))
     if opts.remove_fingers:
         step("fingers")
@@ -474,6 +487,7 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
             "split": asdict(split),
             "crop": {"box": [x0, y0, x1, y1], "confidence": round(crop_conf, 3)},
             "options": asdict(opts),
+            "page_options": {k: getattr(opts.for_page(idx), k) for k in PAGE_KEYS},
             "ocr_words": sum(len(l.get("words", [])) for b in ocr.get("blocks", []) for l in b.get("lines", [])),
         }
         write_page(pages_dir, pid, final, ocr, meta)

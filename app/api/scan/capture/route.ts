@@ -6,13 +6,16 @@ import { randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import {
-  captureOfPage, isPageId, isSessionId, placeholder, rawPath, sessionDir, updateSession,
+  captureOfPage, isPageId, isSessionId, normaliseOptions, placeholder, rawPath, sessionDir, updateSession,
 } from '@/lib/server/scanStore';
+import type { ScanOptions } from '@/lib/scanTypes';
 import { scanWorker } from '@/lib/server/scanWorker';
 
 /**
- * POST multipart { sessionId, photo: File, replace?: pageId }
+ * POST multipart { sessionId, photo: File, options?: JSON ScanOptions, replace?: pageId }
  *
+ * `options` are the options for this capture (set per page in the UI);
+ * without them the session defaults are used.
  * The photo is written to raw/ before anything else, so a crash during
  * processing never loses the scan. `replace` (retake) puts the new capture
  * where that page was and drops the old page.
@@ -23,6 +26,13 @@ export async function POST(req: NextRequest) {
   const sessionId = form.get('sessionId');
   const photo = form.get('photo') as File | null;
   const replace = form.get('replace');
+  let options: Partial<ScanOptions> | undefined;
+  try {
+    const raw = form.get('options');
+    options = typeof raw === 'string' && raw ? (JSON.parse(raw) as Partial<ScanOptions>) : undefined;
+  } catch {
+    return NextResponse.json({ error: 'Invalid options' }, { status: 400 });
+  }
   if (!isSessionId(sessionId)) return NextResponse.json({ error: 'Invalid sessionId' }, { status: 400 });
   if (!photo || typeof photo === 'string') return NextResponse.json({ error: 'No photo' }, { status: 400 });
   if (replace && !isPageId(replace)) return NextResponse.json({ error: 'Invalid replace' }, { status: 400 });
@@ -42,7 +52,7 @@ export async function POST(req: NextRequest) {
       await rename(tmp, rawPath(sessionId, no));
       s.captures[no] = {
         no,
-        options: { ...s.options },
+        options: normaliseOptions(options, s.options),
         overrides: {},
         status: 'queued',
         attempts: 0,

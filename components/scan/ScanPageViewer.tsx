@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { ScanPageView } from '@/lib/scanTypes';
 import { imageUrl, type PageOverride } from '@/lib/scanClient';
 import { badgeFor } from './PageStrip';
@@ -69,16 +69,12 @@ export function ScanPageViewer({
             {info.of > 1 ? 'Treat as one page' : 'Split into two'}
           </button>
         )}
-        {info && (
-          <button type="button" className="focus-ring px-3 py-1.5" style={btn}
-            onClick={() => onOverride(p, { keepColour: !info.colour })}>
-            {info.colour ? 'Clean this page' : 'Keep colour'}
-          </button>
-        )}
-        <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={() => onOverride(p, { dewarp: false })}>Re-run without dewarp</button>
         <button type="button" className="focus-ring px-3 py-1.5" style={{ ...btn, color: 'var(--color-danger)' }} onClick={() => onDelete(p)}>Delete</button>
         <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={onClose} aria-label="Close">✕</button>
       </div>
+      {info && p.status === 'done' && (
+        <PageOptionsBar key={`${p.id}:${p.version}`} page={p} onApply={(o) => onOverride(p, o)} />
+      )}
       {info?.warnings.map((w) => (
         <p key={w} className="px-4 text-sm" style={{ color: 'oklch(85% 0.14 75)' }}>⚠ {w}</p>
       ))}
@@ -99,6 +95,65 @@ export function ScanPageViewer({
         <button type="button" disabled={index === pages.length - 1} onClick={(e) => { e.stopPropagation(); onNavigate(index + 1); }}
           className="focus-ring absolute right-3 px-3 py-6 text-2xl" style={{ ...btn, opacity: index === pages.length - 1 ? 0.3 : 0.9 }} aria-label="Next page">›</button>
       </div>
+    </div>
+  );
+}
+
+/** Options of this one page: change them and re-run just this page. */
+function PageOptionsBar({ page, onApply }: { page: ScanPageView; onApply: (o: PageOverride) => void }) {
+  // what the page is now: colour as it came out (Clean keeps covers in colour)
+  const now = {
+    colorMode: page.info?.colour ? 'colour' as const : 'clean' as const,
+    dewarp: page.options.dewarp,
+    removeFingers: page.options.removeFingers,
+  };
+  const [draft, setDraft] = useState(now);
+  const changed: PageOverride = {};
+  if (draft.colorMode !== now.colorMode) changed.colorMode = draft.colorMode;
+  if (draft.dewarp !== now.dewarp) changed.dewarp = draft.dewarp;
+  if (draft.removeFingers !== now.removeFingers) changed.removeFingers = draft.removeFingers;
+  const dirty = Object.keys(changed).length > 0;
+  return (
+    <div
+      className="mx-4 mb-1 px-3 py-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm"
+      style={{ background: 'var(--color-surface-card)', color: 'var(--color-ink)', borderRadius: 'var(--radius-md)' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--color-ink-muted)' }}>This page</span>
+      <div className="flex items-center gap-3" role="radiogroup" aria-label="Colour or clean for this page">
+        {(['colour', 'clean'] as const).map((m) => (
+          <label key={m} className="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" name="page-color-mode" className="focus-ring" checked={draft.colorMode === m}
+              onChange={() => setDraft({ ...draft, colorMode: m })} />
+            {m === 'colour' ? 'Colour' : 'Clean'}
+          </label>
+        ))}
+      </div>
+      <label className="flex items-center gap-1.5 cursor-pointer">
+        <input type="checkbox" className="focus-ring" checked={draft.dewarp} onChange={(e) => setDraft({ ...draft, dewarp: e.target.checked })} />
+        Dewarp
+      </label>
+      <label className="flex items-center gap-1.5 cursor-pointer">
+        <input type="checkbox" className="focus-ring" checked={draft.removeFingers} onChange={(e) => setDraft({ ...draft, removeFingers: e.target.checked })} />
+        Remove fingers
+      </label>
+      <label className="flex items-center gap-1.5" style={{ color: 'var(--color-ink-muted)' }}>
+        <input type="checkbox" checked disabled readOnly />
+        OCR (always on)
+      </label>
+      <button
+        type="button"
+        disabled={!dirty}
+        onClick={() => onApply(changed)}
+        className="focus-ring px-3 py-1.5 text-sm font-semibold"
+        style={{
+          background: dirty ? 'var(--color-primary)' : 'var(--color-border)',
+          color: dirty ? '#fff' : 'var(--color-ink-subtle)',
+          border: 'none', borderRadius: 'var(--radius-md)', cursor: dirty ? 'pointer' : 'not-allowed',
+        }}
+      >
+        Re-run this page
+      </button>
     </div>
   );
 }

@@ -126,6 +126,11 @@ export function PageStrip({
               <span className="font-medium" style={{ color: 'var(--color-ink)' }}>{i + 1}</span>
               {spreadHalf && <span title="From a two-page spread">{p.info!.index === 1 ? 'L' : 'R'}</span>}
             </div>
+            <p className="px-1.5 text-[10px] leading-tight" style={{ color: 'var(--color-ink-subtle)' }} title="This page's options">
+              {(p.info ? p.info.colour : p.options.colorMode === 'colour') ? 'Colour' : 'Clean'}
+              {p.options.dewarp ? '' : ' · no dewarp'}
+              {p.options.removeFingers ? '' : ' · fingers kept'}
+            </p>
             {p.status === 'error' && p.error && (
               <p className="px-1.5 text-[10px] leading-tight" style={{ color: 'var(--color-danger)' }}>{p.error}</p>
             )}

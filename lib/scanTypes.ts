@@ -10,14 +10,20 @@ export interface ScanOptions {
   split: SplitMode;
 }
 
-/** Per-capture changes made after the fact; page keys are the index within the capture (1, 2). */
+/** Options of one page. */
+export interface PageOptions {
+  colorMode: ColorMode;
+  dewarp: boolean;
+  removeFingers: boolean;
+}
+
+/** Changes made after the fact. Page keys are the index within the capture (1, 2). */
 export interface CaptureOverrides {
-  colorMode?: ColorMode;
-  dewarp?: boolean;
-  removeFingers?: boolean;
   split?: SplitMode;
   rotate?: Record<string, number>;
   keepColour?: Record<string, boolean>;
+  /** per-page options (Colour/Clean, Dewarp, Remove fingers) */
+  pages?: Record<string, Partial<PageOptions>>;
 }
 
 export type CaptureStatus = 'queued' | 'processing' | 'done' | 'error';
@@ -72,6 +78,8 @@ export interface ScanPageView {
   stage?: string;
   error?: string;
   info?: ScanPageInfo;
+  /** the options this page is processed with */
+  options: PageOptions & { split: SplitMode };
   /** changes when the page image changes (cache-busting for <img>) */
   version: string;
 }

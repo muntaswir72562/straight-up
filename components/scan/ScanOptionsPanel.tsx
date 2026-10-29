@@ -15,7 +15,7 @@ export function ScanOptionsPanel({
   return (
     <fieldset className="p-3 text-sm" style={{ ...box, opacity: disabled ? 0.6 : 1 }} disabled={disabled}>
       <legend className="px-1 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--color-ink-muted)' }}>
-        Options for new scans
+        Options for the next scan
       </legend>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2" style={{ color: 'var(--color-ink)' }}>
         <div className="flex items-center gap-3" role="radiogroup" aria-label="Colour or clean">
@@ -58,11 +58,10 @@ export function ScanOptionsPanel({
           OCR (always on)
         </label>
       </div>
-      {options.colorMode === 'clean' && (
-        <p className="mt-2 text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
-          Clean: white background, no bleed-through. Covers and illustrations stay in colour automatically.
-        </p>
-      )}
+      <p className="mt-2 text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+        {options.colorMode === 'clean' ? 'Clean: white background, no bleed-through. Covers and illustrations stay in colour automatically. ' : ''}
+        Every page keeps the options it was scanned with; open a page to change them for that page only.
+      </p>
     </fieldset>
   );
 }

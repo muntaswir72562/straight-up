@@ -314,6 +314,18 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         self.assertTrue(pages[0]["colour"])
 
+    def test_per_page_options(self):
+        # spread: left page cleaned, right page kept in colour without dewarp
+        img, _ = spread()
+        frame, _ = on_pad(img, frame=(1900, 2600))
+        pages = self._run(frame, 4, color_mode="clean",
+                          per_page={"2": {"color_mode": "colour", "dewarp": False}})
+        self.assertEqual(len(pages), 2)
+        self.assertFalse(pages[0]["colour"])
+        self.assertTrue(pages[1]["colour"])
+        self.assertEqual(pages[0]["page_options"], {"color_mode": "clean", "dewarp": True, "remove_fingers": True})
+        self.assertEqual(pages[1]["page_options"], {"color_mode": "colour", "dewarp": False, "remove_fingers": True})
+
     def test_overrides(self):
         img, _ = spread()
         frame, _ = on_pad(img, frame=(1900, 2600))

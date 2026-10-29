@@ -93,7 +93,7 @@ jobs:
           $f = Get-Item desktop/dist/StraightUp-Setup.exe
           "{0} {1:N0} MB" -f $f.Name, ($f.Length / 1MB)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: StraightUp-Setup
           path: desktop/dist/StraightUp-Setup.exe

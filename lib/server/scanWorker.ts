@@ -149,19 +149,28 @@ class ScanWorker {
       this.pump();
       return;
     }
-    const o = { ...cap.options, ...cap.overrides };
+    const ov = cap.overrides ?? {};
+    const perPage: Record<string, Record<string, unknown>> = {};
+    for (const [idx, p] of Object.entries(ov.pages ?? {})) {
+      perPage[idx] = {
+        ...(p.colorMode ? { color_mode: p.colorMode } : {}),
+        ...(typeof p.dewarp === 'boolean' ? { dewarp: p.dewarp } : {}),
+        ...(typeof p.removeFingers === 'boolean' ? { remove_fingers: p.removeFingers } : {}),
+      };
+    }
     const msg = {
       id: job.jobId,
       type: 'process',
       session_dir: sessionDir(job.sessionId),
       capture: job.capture,
       options: {
-        color_mode: o.colorMode,
-        dewarp: o.dewarp,
-        remove_fingers: o.removeFingers,
-        split: o.split,
-        rotate: o.rotate ?? {},
-        keep_colour: o.keepColour ?? {},
+        color_mode: cap.options.colorMode,
+        dewarp: cap.options.dewarp,
+        remove_fingers: cap.options.removeFingers,
+        split: ov.split ?? cap.options.split,
+        rotate: ov.rotate ?? {},
+        keep_colour: ov.keepColour ?? {},
+        per_page: perPage,
       },
     };
     this.proc?.stdin?.write(JSON.stringify(msg) + '\n');

@@ -37,10 +37,13 @@ export async function patchSession(
   }));
 }
 
-export async function uploadCapture(sessionId: string, photo: Blob, replace?: string): Promise<{ capture: number }> {
+export async function uploadCapture(
+  sessionId: string, photo: Blob, options: ScanOptions, replace?: string,
+): Promise<{ capture: number }> {
   const form = new FormData();
   form.append('sessionId', sessionId);
   form.append('photo', photo, 'capture.jpg');
+  form.append('options', JSON.stringify(options));
   if (replace) form.append('replace', replace);
   return json(await fetch('/api/scan/capture', { method: 'POST', body: form }));
 }
