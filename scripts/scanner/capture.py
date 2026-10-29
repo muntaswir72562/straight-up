@@ -27,6 +27,7 @@ CROP_MARGIN = 0.012   # margin kept around the detected paper, fraction of the l
 SPLIT_OVERLAP = 12    # px kept past the spine on each side, so no letter is cut
 PAGE_HEIGHT_IN = 9.5  # typical law book height, only used to estimate the DPI
 JPEG_QUALITY = 92
+THUMB_W = 320         # page strip thumbnails
 
 
 @dataclass
@@ -512,4 +513,7 @@ def write_page(pages_dir: str, pid: str, img: np.ndarray, ocr: dict, meta: dict)
         raise RuntimeError("jpeg encode failed")
     _atomic_write(base + ".jpg", buf.tobytes())
     _atomic_write(base + ".ocr.json", json.dumps(ocr, ensure_ascii=False).encode("utf-8"))
+    th = cv2.resize(img, (THUMB_W, max(1, int(img.shape[0] * THUMB_W / img.shape[1]))), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", th, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    _atomic_write(base + ".thumb.jpg", buf.tobytes())
     _atomic_write(base + ".meta.json", json.dumps(meta, ensure_ascii=False).encode("utf-8"))

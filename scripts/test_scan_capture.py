@@ -322,7 +322,7 @@ class TestPipeline(unittest.TestCase):
         pages = self._run(frame, 3, split="two", dewarp=False, rotate={"1": 180})
         self.assertEqual(len(pages), 2)
         left = [f for f in os.listdir(os.path.join(self.tmp, "pages")) if f.startswith("page_0003_")]
-        self.assertEqual(len(left), 6)
+        self.assertEqual(len(left), 8)  # jpg, thumb, ocr, meta x 2
 
 
 @unittest.skipUnless(os.path.isdir(REAL_DIR), "no real IRIScan photos in scripts/test_pages/scan")
