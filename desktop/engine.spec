@@ -2,7 +2,7 @@
 #   cd desktop && pyinstaller engine.spec --noconfirm
 # Output: desktop/dist/engine/engine.exe (+ _internal/)
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 import sys
 SCRIPTS = os.path.abspath(os.path.join(SPECPATH, '..', 'scripts'))
@@ -17,6 +17,8 @@ hidden = [
 a = Analysis(
     [os.path.join(SCRIPTS, 'engine.py')],
     pathex=[SCRIPTS],
+    # pymupdf >= 2.0 reads model files from its package folder at import
+    datas=collect_data_files('pymupdf'),
     hiddenimports=hidden + ['scipy.ndimage', 'scipy.interpolate', 'scipy.signal'],
     excludes=['tkinter', 'matplotlib', 'IPython', 'pytest', 'PyQt5', 'PySide6'],
     noarchive=False,

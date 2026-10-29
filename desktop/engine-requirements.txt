@@ -1,0 +1,7 @@
+# Python packages for the desktop engine build (PyInstaller). Same as
+# scripts/requirements.txt, with the versions the engine was verified with
+# pinned, so the installer doesn't change when a new release comes out.
+# (pymupdf 2.0 loads an ONNX layout model at import; not verified frozen yet.)
+-r ../scripts/requirements.txt
+pymupdf==1.28.2
+pyinstaller==6.22.3

@@ -53,7 +53,7 @@ npm ci
 npx next build
 node desktop/scripts/prepare-server.js
 
-pip install -r scripts/requirements.txt pyinstaller
+pip install -r desktop/engine-requirements.txt
 cd desktop
 pyinstaller engine.spec --noconfirm --distpath resources --workpath ../build/pyi
 powershell -ExecutionPolicy Bypass -File scripts/fetch-tesseract.ps1   # unpacks the UB Mannheim installer with 7-Zip

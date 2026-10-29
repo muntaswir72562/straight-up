@@ -34,7 +34,9 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: scripts/requirements.txt
+          cache-dependency-path: |
+            scripts/requirements.txt
+            desktop/engine-requirements.txt
 
       # ── Next.js standalone server ────────────────────────────────────
       - name: Install web dependencies
@@ -50,7 +52,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r scripts/requirements.txt pyinstaller
+          pip install -r desktop/engine-requirements.txt
 
       - name: Build engine
         working-directory: desktop
