@@ -493,6 +493,17 @@ export function ScanBook() {
               </p>
             )}
           </div>
+          {pageCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setViewer(0)}
+              className="focus-ring w-full px-4 py-1.5 text-sm font-medium"
+              style={secondaryBtn}
+              title="Scroll through all pages at full size"
+            >
+              View pages ({pageCount})
+            </button>
+          )}
           <div className="flex-1 min-h-0 overflow-y-auto p-2 max-lg:max-h-[70vh]" style={{ ...card, borderRadius: 'var(--radius-md)' }}>
             <PageStrip
               sessionId={session?.id ?? ''}
@@ -511,7 +522,6 @@ export function ScanBook() {
           sessionId={session.id}
           pages={pages}
           index={viewer}
-          onNavigate={setViewer}
           onClose={() => setViewer(null)}
           onOverride={onOverride}
           onDelete={(p) => { setViewer(null); onDelete(p); }}
