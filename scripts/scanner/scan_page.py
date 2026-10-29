@@ -104,7 +104,21 @@ def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.n
 
     # Scanner modules expect BGR (3-channel) input
     bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    bgr = _v2_steps(bgr, tag)
 
+    # Convert back to grayscale
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+
+def process_page_v2_bgr(bgr: np.ndarray, page_num: int = 0, total: int = 0) -> np.ndarray:
+    """Colour variant of process_page_v2 (Scan Book): the same steps, the
+    same skip rules, applied to a BGR image, so a colour page gets the same
+    detect -> rectify -> dewarp -> align_columns geometry. Returns BGR."""
+    return _v2_steps(bgr, f"[scan-v2] Page {page_num}/{total}")
+
+
+def _v2_steps(bgr: np.ndarray, tag: str) -> np.ndarray:
+    """detect -> rectify -> dewarp -> align_columns on a BGR image."""
     # Step 1: Document boundary detection
     det = detect_document(bgr)
 
@@ -143,5 +157,4 @@ def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.n
     else:
         print(f"{tag}: align skipped ({ainfo.reason})", file=sys.stderr)
 
-    # Convert back to grayscale
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    return bgr
