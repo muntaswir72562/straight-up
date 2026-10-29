@@ -952,7 +952,8 @@ export function BookScanTool() {
         >
           {([
             { key: 'merge' as ToolMode, label: 'Merge' },
-            { key: 'fullfix' as ToolMode, label: 'Full Book Fix' },
+            // Full Book Fix is hidden for now (the mode and its code are kept):
+            // { key: 'fullfix' as ToolMode, label: 'Full Book Fix' },
             { key: 'replace' as ToolMode, label: 'Replace Pages' },
             { key: 'scan' as ToolMode, label: 'Scan Book' },
           ]).map((tab) => (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
 const CAMERA_KEY = 'straightup.scan.camera';
 const JPEG_QUALITY = 0.95;
@@ -44,7 +44,8 @@ function errorMessage(e: unknown): string {
   return `Could not start the camera: ${(e as Error)?.message || String(e)}`;
 }
 
-export function CameraPreview({ ref, flashKey }: { ref?: Ref<CameraHandle>; flashKey: number }) {
+/** Camera picker, then `children` (options, Scan button), then the live preview. */
+export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHandle>; flashKey: number; children?: ReactNode }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const photoRef = useRef<{ ic: ImageCaptureLike; w?: number; h?: number } | null>(null);
@@ -157,6 +158,31 @@ export function CameraPreview({ ref, flashKey }: { ref?: Ref<CameraHandle>; flas
 
   return (
     <div>
+      <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--color-ink-muted)' }}>
+        <label className="flex items-center gap-2">
+          Camera
+          <select
+            value={deviceId}
+            onChange={(e) => pick(e.target.value)}
+            className="focus-ring px-2 py-1 text-xs"
+            style={{ background: 'var(--color-surface-inset)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-ink)', maxWidth: '16rem' }}
+          >
+            <option value="">Default camera</option>
+            {devices.map((d, i) => (
+              <option key={d.deviceId || i} value={d.deviceId}>{d.label || `Camera ${i + 1}`}</option>
+            ))}
+          </select>
+        </label>
+        {state.kind === 'live' && (
+          <span>
+            Preview {state.width}×{state.height}
+            {state.photoWidth && state.photoWidth > state.width
+              ? ` · photos ${state.photoWidth}×${state.photoHeight}`
+              : ' · photos at preview resolution'}
+          </span>
+        )}
+      </div>
+      {children}
       <div
         className="relative w-full overflow-hidden"
         style={{
@@ -193,30 +219,6 @@ export function CameraPreview({ ref, flashKey }: { ref?: Ref<CameraHandle>; flas
           </div>
         )}
         <div ref={flashRef} aria-hidden className="absolute inset-0 pointer-events-none" style={{ background: '#fff', opacity: 0 }} />
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--color-ink-muted)' }}>
-        <label className="flex items-center gap-2">
-          Camera
-          <select
-            value={deviceId}
-            onChange={(e) => pick(e.target.value)}
-            className="focus-ring px-2 py-1 text-xs"
-            style={{ background: 'var(--color-surface-inset)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-ink)', maxWidth: '16rem' }}
-          >
-            <option value="">Default camera</option>
-            {devices.map((d, i) => (
-              <option key={d.deviceId || i} value={d.deviceId}>{d.label || `Camera ${i + 1}`}</option>
-            ))}
-          </select>
-        </label>
-        {state.kind === 'live' && (
-          <span>
-            Preview {state.width}×{state.height}
-            {state.photoWidth && state.photoWidth > state.width
-              ? ` · photos ${state.photoWidth}×${state.photoHeight}`
-              : ' · photos at preview resolution'}
-          </span>
-        )}
       </div>
     </div>
   );

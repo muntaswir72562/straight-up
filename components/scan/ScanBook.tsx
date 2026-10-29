@@ -422,31 +422,32 @@ export function ScanBook() {
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)]">
         <div className="flex flex-col gap-3 min-w-0">
-          <CameraPreview ref={cameraRef} flashKey={flashKey} />
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={scan}
-              onKeyDown={(e) => { if (e.key === ' ') e.preventDefault(); }}
-              className="focus-ring flex-1 px-8 py-4 text-xl font-bold"
-              style={{
-                minWidth: '14rem',
-                background: retakeTarget ? 'var(--color-accent)' : 'var(--color-primary)',
-                color: '#fff', border: 'none', borderRadius: 'var(--radius-lg)', cursor: 'pointer', boxShadow: 'var(--shadow-md)',
-              }}
-            >
-              {retakeTarget
-                ? `Retake page ${pages.findIndex((p) => p.id === retakeTarget) + 1}`
-                : 'Scan'}
-              <span className="ml-2 text-sm font-medium" style={{ opacity: 0.8 }}>(Space)</span>
-            </button>
-            {retakeTarget && (
-              <button type="button" className="focus-ring px-4 py-3 text-sm font-medium" style={secondaryBtn} onClick={() => setRetakeTarget(null)}>
-                Cancel retake
+          <CameraPreview ref={cameraRef} flashKey={flashKey}>
+            <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} />
+            <div className="my-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={scan}
+                onKeyDown={(e) => { if (e.key === ' ') e.preventDefault(); }}
+                className="focus-ring flex-1 px-8 py-4 text-xl font-bold"
+                style={{
+                  minWidth: '14rem',
+                  background: retakeTarget ? 'var(--color-accent)' : 'var(--color-primary)',
+                  color: '#fff', border: 'none', borderRadius: 'var(--radius-lg)', cursor: 'pointer', boxShadow: 'var(--shadow-md)',
+                }}
+              >
+                {retakeTarget
+                  ? `Retake page ${pages.findIndex((p) => p.id === retakeTarget) + 1}`
+                  : 'Scan'}
+                <span className="ml-2 text-sm font-medium" style={{ opacity: 0.8 }}>(Space)</span>
               </button>
-            )}
-          </div>
-          <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} />
+              {retakeTarget && (
+                <button type="button" className="focus-ring px-4 py-3 text-sm font-medium" style={secondaryBtn} onClick={() => setRetakeTarget(null)}>
+                  Cancel retake
+                </button>
+              )}
+            </div>
+          </CameraPreview>
         </div>
 
         <div className="flex flex-col gap-3 min-w-0">
