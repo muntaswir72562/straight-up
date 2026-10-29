@@ -74,7 +74,6 @@ export function ScanBook() {
   const [retakeTarget, setRetakeTarget] = useState<string | null>(null);
   const [viewer, setViewer] = useState<number | null>(null);
   const [flashKey, setFlashKey] = useState(0);
-  const [exportTxt, setExportTxt] = useState(true);
   const [exporting, setExporting] = useState<{ phase: string; current: number; total: number } | null>(null);
 
   const cameraRef = useRef<CameraHandle>(null);
@@ -300,7 +299,7 @@ export function ScanBook() {
     const id = session.id;
     setExporting({ phase: 'preparing', current: 0, total: 0 });
     try {
-      await startExport(id, exportTxt);
+      await startExport(id, false);
       for (;;) {
         await new Promise((r) => setTimeout(r, 800));
         const p = await exportProgress(id);
@@ -308,15 +307,12 @@ export function ScanBook() {
         if (p.phase === 'error') throw new Error(p.error || 'Export failed');
         if (p.phase === 'done') break;
       }
-      const files: ('pdf' | 'txt')[] = exportTxt ? ['pdf', 'txt'] : ['pdf'];
-      files.forEach((kind, i) => setTimeout(() => {
-        const a = document.createElement('a');
-        a.href = exportUrl(id, kind);
-        a.download = '';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }, i * 700));
+      const a = document.createElement('a');
+      a.href = exportUrl(id, 'pdf');
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
       setError(null);
       refresh();
     } catch (e) {
@@ -468,10 +464,6 @@ export function ScanBook() {
                   ? exporting.total ? `Building PDF… ${exporting.current}/${exporting.total}` : 'Building PDF…'
                   : 'Export searchable PDF'}
               </button>
-              <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--color-ink-muted)' }}>
-                <input type="checkbox" className="focus-ring" checked={exportTxt} onChange={(e) => setExportTxt(e.target.checked)} />
-                + .txt
-              </label>
             </div>
             {exportHint && <p className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>{exportHint}</p>}
             {session?.exportedAt && !exporting && (
