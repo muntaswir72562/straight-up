@@ -33,6 +33,27 @@ THUMB_W = 320         # page strip thumbnails
 PAGE_KEYS = ("color_mode", "dewarp", "remove_fingers")
 
 
+def _valid_crop(c):
+    """A crop rectangle {x, y, w, h} (fractions), clamped to the photo, or None."""
+    try:
+        x, y, w, h = (float(c[k]) for k in ("x", "y", "w", "h"))
+    except (TypeError, KeyError, ValueError):
+        return None
+    x, y = min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0)
+    w, h = min(w, 1.0 - x), min(h, 1.0 - y)
+    if w < 0.05 or h < 0.05:
+        return None
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def crop_box(shape, crop):
+    """Pixel box (x0, y0, x1, y1) of a fractional crop rectangle."""
+    H, W = shape[:2]
+    x0, y0 = int(round(crop["x"] * W)), int(round(crop["y"] * H))
+    x1, y1 = int(round((crop["x"] + crop["w"]) * W)), int(round((crop["y"] + crop["h"]) * H))
+    return max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+
+
 @dataclass
 class Options:
     color_mode: str = "clean"        # "clean" | "colour"
@@ -44,6 +65,9 @@ class Options:
     keep_colour: dict = field(default_factory=dict)   # {idx: True|False}
     # per-page options, override the ones above for that page: {idx: {"color_mode", "dewarp", "remove_fingers"}}
     per_page: dict = field(default_factory=dict)
+    # crop area drawn on the camera preview, as fractions of the photo
+    # {"x", "y", "w", "h"} in 0..1; None = find the page automatically
+    crop: dict | None = None
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Options":
@@ -53,6 +77,7 @@ class Options:
         o.keep_colour = {int(k): bool(v) for k, v in (o.keep_colour or {}).items()}
         o.per_page = {int(k): {kk: vv for kk, vv in (v or {}).items() if kk in PAGE_KEYS}
                       for k, v in (o.per_page or {}).items()}
+        o.crop = _valid_crop(o.crop)
         return o
 
     def for_page(self, idx: int) -> "Options":
@@ -452,7 +477,11 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
         raise ValueError(f"cannot read {raw_path}")
     if progress:
         progress("crop")
-    (x0, y0, x1, y1), crop_conf = find_book_region(img)
+    if opts.crop:
+        # the operator drew the page area on the preview: use exactly that
+        (x0, y0, x1, y1), crop_conf = crop_box(img.shape, opts.crop), 1.0
+    else:
+        (x0, y0, x1, y1), crop_conf = find_book_region(img)
     crop = img[y0:y1, x0:x1]
     _log(f"capture {capture_no}: {img.shape[1]}x{img.shape[0]} -> crop {x1 - x0}x{y1 - y0} conf={crop_conf:.2f}")
     del img
@@ -485,7 +514,8 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
             "width": int(final.shape[1]), "height": int(final.shape[0]), "dpi": dpi,
             "colour": info["colour"], "warnings": info["warnings"],
             "split": asdict(split),
-            "crop": {"box": [x0, y0, x1, y1], "confidence": round(crop_conf, 3)},
+            "crop": {"box": [x0, y0, x1, y1], "confidence": round(crop_conf, 3),
+                     "source": "manual" if opts.crop else "auto"},
             "options": asdict(opts),
             "page_options": {k: getattr(opts.for_page(idx), k) for k in PAGE_KEYS},
             "ocr_words": sum(len(l.get("words", [])) for b in ocr.get("blocks", []) for l in b.get("lines", [])),

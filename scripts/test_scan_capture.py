@@ -326,6 +326,28 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(pages[0]["page_options"], {"color_mode": "clean", "dewarp": True, "remove_fingers": True})
         self.assertEqual(pages[1]["page_options"], {"color_mode": "colour", "dewarp": False, "remove_fingers": True})
 
+    def test_manual_crop(self):
+        # crop drawn around the left page of a spread only -> one page
+        img, sx = spread()
+        frame, (x, y) = on_pad(img, frame=(1900, 2600))
+        H, W = frame.shape[:2]
+        crop = {"x": x / W, "y": y / H, "w": sx / W, "h": img.shape[0] / H}
+        pages = self._run(frame, 5, crop=crop, split="auto", dewarp=False)
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["crop"]["source"], "manual")
+        x0, y0, x1, y1 = pages[0]["crop"]["box"]
+        self.assertLess(abs(x0 - x), 2)
+        self.assertLess(abs((x1 - x0) - sx), 2)
+        # crop around the whole spread -> still split at the spine
+        crop = {"x": x / W, "y": y / H, "w": img.shape[1] / W, "h": img.shape[0] / H}
+        self.assertEqual(len(self._run(frame, 6, crop=crop, dewarp=False)), 2)
+
+    def test_bad_crop_ignored(self):
+        o = Options.from_dict({"crop": {"x": 0.5, "y": 0.5, "w": 0.01, "h": 0.3}})
+        self.assertIsNone(o.crop)
+        o = Options.from_dict({"crop": {"x": 0.8, "y": 0.1, "w": 0.5, "h": 0.5}})
+        self.assertAlmostEqual(o.crop["w"], 0.2)
+
     def test_overrides(self):
         img, _ = spread()
         frame, _ = on_pad(img, frame=(1900, 2600))

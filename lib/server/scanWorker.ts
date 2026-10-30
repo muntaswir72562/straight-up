@@ -171,6 +171,7 @@ class ScanWorker {
         rotate: ov.rotate ?? {},
         keep_colour: ov.keepColour ?? {},
         per_page: perPage,
+        crop: cap.options.crop ?? null,
       },
     };
     this.proc?.stdin?.write(JSON.stringify(msg) + '\n');

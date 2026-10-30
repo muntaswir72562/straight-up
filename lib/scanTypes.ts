@@ -3,11 +3,21 @@
 export type ColorMode = 'clean' | 'colour';
 export type SplitMode = 'auto' | 'one' | 'two';
 
+/** Crop area drawn on the camera preview, as fractions (0..1) of the photo. */
+export interface CropRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ScanOptions {
   colorMode: ColorMode;
   dewarp: boolean;
   removeFingers: boolean;
   split: SplitMode;
+  /** null/absent: find the page automatically */
+  crop?: CropRect | null;
 }
 
 /** Options of one page. */

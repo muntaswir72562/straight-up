@@ -196,11 +196,11 @@ export function ScanBook() {
     if (capturingRef.current || !cameraRef.current) return;
     capturingRef.current = true;
     try {
-      const blob = await cameraRef.current.capture();
+      const { blob, crop } = await cameraRef.current.capture();
       setFlashKey((k) => k + 1);
       beep();
       const id = await ensureSession();
-      upload(id, blob, nextOptions, retakeTarget ?? undefined);
+      upload(id, blob, { ...nextOptions, crop }, retakeTarget ?? undefined);
       setRetakeTarget(null);
       setError(null);
     } catch (e) {

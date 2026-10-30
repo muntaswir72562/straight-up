@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rename, writeFile, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import type { ScanOptions, ScanSession, ScanCapture, ScanPageInfo } from '@/lib/scanTypes';
+import type { CropRect, ScanOptions, ScanSession, ScanCapture, ScanPageInfo } from '@/lib/scanTypes';
 
 /**
  * Scan Book sessions live on disk (not in memory, not in the temp dir), so a
@@ -109,8 +109,18 @@ export const DEFAULT_OPTIONS: ScanOptions = {
   split: 'auto',
 };
 
+function validCrop(c: unknown): CropRect | null {
+  if (!c || typeof c !== 'object') return null;
+  const { x, y, w, h } = c as Record<string, unknown>;
+  if (![x, y, w, h].every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+  const r = { x: x as number, y: y as number, w: w as number, h: h as number };
+  if (r.x < 0 || r.y < 0 || r.w < 0.05 || r.h < 0.05 || r.x + r.w > 1.0001 || r.y + r.h > 1.0001) return null;
+  return r;
+}
+
 export function normaliseOptions(o: Partial<ScanOptions> | undefined, base = DEFAULT_OPTIONS): ScanOptions {
   return {
+    crop: o && 'crop' in o ? validCrop(o.crop) : base.crop ?? null,
     colorMode: o?.colorMode === 'colour' || o?.colorMode === 'clean' ? o.colorMode : base.colorMode,
     dewarp: typeof o?.dewarp === 'boolean' ? o.dewarp : base.dewarp,
     removeFingers: typeof o?.removeFingers === 'boolean' ? o.removeFingers : base.removeFingers,

@@ -1,13 +1,24 @@
 'use client';
 
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
+import type { CropRect } from '@/lib/scanTypes';
+import { CropOverlay } from './CropOverlay';
 
 const CAMERA_KEY = 'straightup.scan.camera';
+const CROP_KEY = 'straightup.scan.crop';
 const JPEG_QUALITY = 0.95;
+const DEFAULT_CROP: CropRect = { x: 0.05, y: 0.05, w: 0.9, h: 0.9 };
 
 export interface CameraHandle {
-  /** Full-resolution still as JPEG. */
-  capture: () => Promise<Blob>;
+  /** Full-resolution still as JPEG, and the crop area to use (null = automatic). */
+  capture: () => Promise<{ blob: Blob; crop: CropRect | null }>;
+}
+
+/** Crop area per camera (the camera is fixed over the pad, so it stays valid). */
+type CropMap = Record<string, { enabled: boolean; rect: CropRect }>;
+
+function readCrops(): CropMap {
+  try { return JSON.parse(localStorage.getItem(CROP_KEY) || '{}') as CropMap; } catch { return {}; }
 }
 
 type CamState =
@@ -54,6 +65,30 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
   const [state, setState] = useState<CamState>({ kind: 'starting' });
   const [attempt, setAttempt] = useState(0);
   const flashRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [crops, setCrops] = useState<CropMap>(readCrops);
+  const camKey = deviceId || 'default';
+  const crop = crops[camKey] ?? { enabled: false, rect: DEFAULT_CROP };
+  const cropRef = useRef<CropRect | null>(null);
+  useEffect(() => { cropRef.current = crop.enabled ? crop.rect : null; }, [crop.enabled, crop.rect]);
+
+  const setCrop = (next: { enabled: boolean; rect: CropRect }, save: boolean) => {
+    setCrops((m) => {
+      const all = { ...m, [camKey]: next };
+      if (save) { try { localStorage.setItem(CROP_KEY, JSON.stringify(all)); } catch { /* ignore */ } }
+      return all;
+    });
+  };
+
+  // size of the preview box: the crop rectangle is drawn over the shown frame
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -133,12 +168,16 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       const video = videoRef.current;
       if (!video || !streamRef.current) throw new Error('Camera not ready');
       const p = photoRef.current;
-      // takePhoto only when it gives more pixels than the video frame
-      if (p && (p.w ?? 0) > video.videoWidth) {
+      const crop = cropRef.current;
+      // takePhoto only when it gives more pixels than the video frame. With a
+      // crop area, only if the photo has the preview's shape too, so the
+      // rectangle drawn on the preview covers the same part of the photo.
+      const sameShape = !!p?.w && !!p?.h
+        && Math.abs(p.w / p.h - video.videoWidth / video.videoHeight) < 0.02;
+      if (p && (p.w ?? 0) > video.videoWidth && (!crop || sameShape)) {
         try {
           const blob = await p.ic.takePhoto({ imageWidth: p.w, imageHeight: p.h });
-          if (blob.type === 'image/jpeg') return blob;
-          return await reencode(blob);
+          return { blob: blob.type === 'image/jpeg' ? blob : await reencode(blob), crop };
         } catch {
           /* some UVC drivers refuse takePhoto: use the video frame */
         }
@@ -147,7 +186,7 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       canvas.getContext('2d')!.drawImage(video, 0, 0);
-      return toJpeg(canvas);
+      return { blob: await toJpeg(canvas), crop };
     },
   }), []);
 
@@ -181,9 +220,30 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
               : ' · photos at preview resolution'}
           </span>
         )}
+        <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'var(--color-ink)' }}
+          title="Draw the page area on the preview: around one page, or around both pages of an open book">
+          <input
+            type="checkbox"
+            className="focus-ring"
+            checked={crop.enabled}
+            onChange={(e) => setCrop({ ...crop, enabled: e.target.checked }, true)}
+          />
+          Crop area
+        </label>
+        {crop.enabled && (
+          <button
+            type="button"
+            onClick={() => setCrop({ enabled: true, rect: DEFAULT_CROP }, true)}
+            className="focus-ring px-2 py-0.5 text-xs"
+            style={{ background: 'transparent', border: '1px solid var(--color-border-strong)', borderRadius: 'var(--radius-sm)', color: 'var(--color-ink-muted)', cursor: 'pointer' }}
+          >
+            Reset
+          </button>
+        )}
       </div>
       {children}
       <div
+        ref={boxRef}
         // fills the height left in the column (the whole frame is shown, letterboxed)
         className="relative w-full flex-1 overflow-hidden min-h-[45vh] lg:min-h-0"
         style={{ background: '#111', borderRadius: 'var(--radius-lg)' }}
@@ -213,6 +273,20 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
             </button>
           </div>
         )}
+        {state.kind === 'live' && crop.enabled && state.width > 0 && state.height > 0 && box.w > 0 && (() => {
+          // where the letterboxed frame sits inside the preview box
+          const k = Math.min(box.w / state.width, box.h / state.height);
+          const w = state.width * k;
+          const h = state.height * k;
+          return (
+            <CropOverlay
+              rect={crop.rect}
+              area={{ left: (box.w - w) / 2, top: (box.h - h) / 2, width: w, height: h }}
+              onChange={(r) => setCrop({ enabled: true, rect: r }, false)}
+              onCommit={(r) => setCrop({ enabled: true, rect: r }, true)}
+            />
+          );
+        })()}
         <div ref={flashRef} aria-hidden className="absolute inset-0 pointer-events-none" style={{ background: '#fff', opacity: 0 }} />
       </div>
     </div>
