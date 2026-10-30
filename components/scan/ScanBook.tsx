@@ -210,20 +210,34 @@ export function ScanBook() {
     }
   }, [upload, ensureSession, nextOptions, retakeTarget]);
 
-  // Space bar = Scan (the operator's hands are on the book)
+  // Space bar or the IRIScan foot pedal (it sends Enter) = Scan: the
+  // operator's hands are on the book
   useEffect(() => {
     if (viewer !== null) return;
+    const NOT_TEXT = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file']);
+    // only fields that take typed text keep their keys; after clicking a
+    // checkbox or a camera option, Space and the pedal must still scan
     const typing = (t: EventTarget | null) => {
       const el = t as HTMLElement | null;
-      return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+      if (!el) return false;
+      if (el.tagName === 'INPUT') return !NOT_TEXT.has((el as HTMLInputElement).type);
+      return el.tagName === 'TEXTAREA' || el.isContentEditable;
     };
+    const isScanKey = (e: KeyboardEvent) =>
+      (e.code === 'Space' || e.key === 'Enter') && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
     const down = (e: KeyboardEvent) => {
-      if (e.code !== 'Space' || typing(e.target)) return;
-      e.preventDefault();
-      if (!e.repeat) scan();
+      if (!isScanKey(e)) return;
+      if ((e.target as HTMLElement | null)?.closest?.('[aria-modal="true"]')) return;
+      if (typing(e.target)) {
+        // Enter in the book name confirms it; the next press scans
+        if (e.key === 'Enter') (e.target as HTMLElement).blur();
+        return;
+      }
+      e.preventDefault();   // and no click on a focused button, no select opening
+      if (!e.repeat) scan(); // a held pedal scans once
     };
     // stop Space from also "clicking" a focused button on key-up
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space' && !typing(e.target)) e.preventDefault(); };
+    const up = (e: KeyboardEvent) => { if (isScanKey(e) && !typing(e.target)) e.preventDefault(); };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
@@ -440,7 +454,7 @@ export function ScanBook() {
               <button
                 type="button"
                 onClick={scan}
-                onKeyDown={(e) => { if (e.key === ' ') e.preventDefault(); }}
+                onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') e.preventDefault(); }}
                 className="focus-ring px-8 py-2 text-xl font-bold"
                 style={{
                   minWidth: '12rem',
@@ -451,7 +465,7 @@ export function ScanBook() {
                 {retakeTarget
                   ? `Retake page ${pages.findIndex((p) => p.id === retakeTarget) + 1}`
                   : 'Scan'}
-                <span className="ml-2 text-sm font-medium" style={{ opacity: 0.8 }}>(Space)</span>
+                <span className="ml-2 text-sm font-medium" style={{ opacity: 0.8 }}>(Space / pedal)</span>
               </button>
               {retakeTarget && (
                 <button type="button" className="focus-ring px-3 text-sm font-medium" style={secondaryBtn} onClick={() => setRetakeTarget(null)}>

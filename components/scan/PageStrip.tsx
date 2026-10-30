@@ -57,7 +57,7 @@ export function PageStrip({
   if (pages.length === 0) {
     return (
       <p className="p-6 text-center text-sm" style={{ color: 'var(--color-ink-subtle)' }}>
-        No pages yet. Put the book under the camera and press <b>Scan</b> or the <b>Space</b> bar.
+        No pages yet. Put the book under the camera and press <b>Scan</b>, the <b>Space</b> bar or the <b>foot pedal</b>.
       </p>
     );
   }
