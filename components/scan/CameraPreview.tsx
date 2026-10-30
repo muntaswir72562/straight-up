@@ -8,6 +8,8 @@ const CAMERA_KEY = 'straightup.scan.camera';
 const CROP_KEY = 'straightup.scan.crop';
 const JPEG_QUALITY = 0.95;
 const DEFAULT_CROP: CropRect = { x: 0.05, y: 0.05, w: 0.9, h: 0.9 };
+const VIEW_ZOOM_MAX = 8;
+const VIEW_ZOOM_STEP = 1.25;
 
 export interface CameraHandle {
   /** Full-resolution still as JPEG, and the crop area to use (null = automatic). */
@@ -72,6 +74,22 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
   const crop = crops[camKey] ?? { enabled: false, rect: DEFAULT_CROP };
   // editing: full frame with the rectangle; otherwise only the crop is shown
   const [editingCrop, setEditingCrop] = useState(false);
+  // Preview zoom (the IRIScan has a fixed lens: this is for looking closely,
+  // photos are not affected). Off while the crop rectangle is edited.
+  const [viewZoom, setViewZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panDrag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const zoomActive = !editingCrop && viewZoom > 1.001;
+  const clampPan = (p: { x: number; y: number }, z: number) => {
+    const mx = ((z - 1) * box.w) / 2;
+    const my = ((z - 1) * box.h) / 2;
+    return { x: Math.max(-mx, Math.min(mx, p.x)), y: Math.max(-my, Math.min(my, p.y)) };
+  };
+  const zoomTo = (z: number) => {
+    const nz = Math.max(1, Math.min(VIEW_ZOOM_MAX, z));
+    setViewZoom(nz);
+    setPan((p) => (nz <= 1.001 ? { x: 0, y: 0 } : clampPan({ x: (p.x * nz) / viewZoom, y: (p.y * nz) / viewZoom }, nz)));
+  };
   const cropRef = useRef<CropRect | null>(null);
   useEffect(() => { cropRef.current = crop.enabled ? crop.rect : null; }, [crop.enabled, crop.rect]);
 
@@ -83,18 +101,41 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
     });
   };
 
+  const zoomToRef = useRef(zoomTo);
+  useEffect(() => { zoomToRef.current = zoomTo; });
+  const viewZoomRef = useRef(viewZoom);
+  useEffect(() => { viewZoomRef.current = viewZoom; }, [viewZoom]);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      zoomToRef.current(viewZoomRef.current * (e.deltaY < 0 ? VIEW_ZOOM_STEP : 1 / VIEW_ZOOM_STEP));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   /** Whole frame letterboxed, or (crop on, not editing) only the crop, enlarged to fit. */
   const videoPlacement = (): React.CSSProperties => {
     const vw = state.kind === 'live' ? state.width : 0;
     const vh = state.kind === 'live' ? state.height : 0;
+    const zoomed = (left: number, top: number): React.CSSProperties => (zoomActive ? {
+      transform: `translate(${pan.x}px, ${pan.y}px) scale(${viewZoom})`,
+      transformOrigin: `${box.w / 2 - left}px ${box.h / 2 - top}px`,
+    } : {});
     if (!crop.enabled || editingCrop || !vw || !vh || !box.w || !box.h) {
-      return { inset: 0, width: '100%', height: '100%', objectFit: 'contain' };
+      return { inset: 0, width: '100%', height: '100%', objectFit: 'contain', ...zoomed(0, 0) };
     }
     const r = crop.rect;
     const k = Math.min(box.w / (r.w * vw), box.h / (r.h * vh));
+    const left = (box.w - r.w * vw * k) / 2 - r.x * vw * k;
+    const top = (box.h - r.h * vh * k) / 2 - r.y * vh * k;
     return {
-      left: (box.w - r.w * vw * k) / 2 - r.x * vw * k,
-      top: (box.h - r.h * vh * k) / 2 - r.y * vh * k,
+      ...zoomed(left, top),
+      left,
+      top,
       width: vw * k,
       height: vh * k,
       objectFit: 'fill',
@@ -286,7 +327,20 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
         ref={boxRef}
         // fills the height left in the column (the whole frame is shown, letterboxed)
         className="relative w-full flex-1 overflow-hidden min-h-[45vh] lg:min-h-0"
-        style={{ background: '#111', borderRadius: 'var(--radius-lg)' }}
+        style={{ background: '#111', borderRadius: 'var(--radius-lg)', cursor: zoomActive ? 'grab' : undefined, touchAction: zoomActive ? 'none' : undefined }}
+        onPointerDown={(e) => {
+          if (!zoomActive) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          panDrag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+        }}
+        onPointerMove={(e) => {
+          const d = panDrag.current;
+          if (!d) return;
+          setPan(clampPan({ x: d.px + e.clientX - d.x, y: d.py + e.clientY - d.y }, viewZoom));
+        }}
+        onPointerUp={() => { panDrag.current = null; }}
+        onPointerCancel={() => { panDrag.current = null; }}
+        onDoubleClick={() => { if (!editingCrop) zoomTo(1); }}
       >
         <video
           ref={videoRef}
@@ -335,6 +389,25 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
             />
           );
         })()}
+        {state.kind === 'live' && !editingCrop && (
+          <div
+            className="absolute right-2 bottom-2 flex items-center gap-0.5 p-0.5 text-xs"
+            style={{ background: 'oklch(15% 0.02 270 / 0.75)', borderRadius: 'var(--radius-md)', color: '#fff' }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            title="Zoom the preview (Ctrl + mouse wheel, drag to move). Photos are not affected."
+          >
+            <button type="button" onClick={() => zoomTo(viewZoom / VIEW_ZOOM_STEP)} disabled={viewZoom <= 1.001}
+              className="focus-ring px-2 py-0.5 font-semibold" style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', opacity: viewZoom <= 1.001 ? 0.4 : 1 }}
+              aria-label="Zoom preview out">−</button>
+            <button type="button" onClick={() => zoomTo(1)} className="focus-ring px-1 tabular-nums"
+              style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', minWidth: '2.8rem' }}
+              aria-label="Reset preview zoom">{Math.round(viewZoom * 100)}%</button>
+            <button type="button" onClick={() => zoomTo(viewZoom * VIEW_ZOOM_STEP)} disabled={viewZoom >= VIEW_ZOOM_MAX}
+              className="focus-ring px-2 py-0.5 font-semibold" style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer' }}
+              aria-label="Zoom preview in">+</button>
+          </div>
+        )}
         <div ref={flashRef} aria-hidden className="absolute inset-0 pointer-events-none" style={{ background: '#fff', opacity: 0 }} />
       </div>
     </div>
