@@ -182,6 +182,21 @@ class TestSpine(unittest.TestCase):
         sheet = text_page(4, w=1000, h=700, columns=2)
         self.assertFalse(detect_spine(sheet).spread)
 
+    def test_pressed_spread_split_at_fold(self):
+        # book pressed flat under the camera: no gutter shadow, only the
+        # empty gap between the text blocks and a faint fold where the pages
+        # meet (measured on an IRIScan photo: ~6 % darker than the paper)
+        left, right = text_page(10), text_page(11)
+        img = np.hstack([left, right]).astype(np.float32)
+        sx = left.shape[1]
+        img[:, sx - 1:sx + 2] *= 0.9
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        sp = detect_spine(img)
+        self.assertTrue(sp.spread, sp.reason)
+        h = img.shape[0]
+        for y in (0.2 * h, 0.5 * h, 0.8 * h):
+            self.assertLess(abs(np.polyval(sp.spine, y) - sx), 6, sp.reason)
+
     def test_flat_spread_split_at_spine(self):
         img, sx = spread()
         sp = detect_spine(img)
@@ -455,7 +470,7 @@ class TestRealPhotos(unittest.TestCase):
             self.assertEqual(out.shape, page.shape, f)
 
     def test_spreads_split(self):
-        for f, crop in self._each("spread_flat*.jpg", "spread_curved*.jpg", "fingers*.jpg"):
+        for f, crop in self._each("spread_flat*.jpg", "spread_curved*.jpg", "spread_pressed*.jpg", "fingers*.jpg"):
             sp = detect_spine(crop)
             self.assertTrue(sp.spread, f"{f}: {sp.reason}")
             x = np.polyval(sp.spine, crop.shape[0] / 2)

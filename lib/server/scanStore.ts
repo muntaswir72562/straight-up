@@ -72,9 +72,28 @@ async function withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
 
 // ── Read / write ─────────────────────────────────────────────────────
 
+/**
+ * On Windows a file that another request is reading can't be replaced
+ * (rename fails with EPERM/EBUSY) and can briefly fail to open. The UI polls
+ * session.json every second while scanning, so these are retried instead of
+ * failing the write (which used to drop the capture from the queue).
+ */
+const TRANSIENT = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+async function retryFs<T>(fn: () => Promise<T>, tries = 12): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= tries || !TRANSIENT.has((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      await new Promise((r) => setTimeout(r, 25 * i));
+    }
+  }
+}
+
 export async function readSession(id: string): Promise<ScanSession | null> {
   try {
-    return JSON.parse(await readFile(join(sessionDir(id), 'session.json'), 'utf8')) as ScanSession;
+    return JSON.parse(await retryFs(() => readFile(join(sessionDir(id), 'session.json'), 'utf8'))) as ScanSession;
   } catch {
     return null;
   }
@@ -85,7 +104,7 @@ async function writeSession(s: ScanSession): Promise<void> {
   const p = join(sessionDir(s.id), 'session.json');
   const tmp = `${p}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(s, null, 1));
-  await rename(tmp, p);
+  await retryFs(() => rename(tmp, p));
 }
 
 /** Read-modify-write under the session lock. Returns the updated session. */

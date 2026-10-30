@@ -1,10 +1,14 @@
 import type { ChildProcess } from 'child_process';
 import { createInterface } from 'readline';
 import { spawnPipeline } from './python';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import {
   listSessions, placePages, readSession, sessionDir, updateSession,
 } from './scanStore';
-import type { ScanCapture, ScanPageInfo } from '@/lib/scanTypes';
+import type { ScanCapture, ScanPageInfo, ScanSession } from '@/lib/scanTypes';
+
+const sessionExists = (id: string) => existsSync(join(sessionDir(id), 'session.json'));
 
 /**
  * One long-lived Python scan worker (scripts/scan_worker.py) fed from an
@@ -59,6 +63,20 @@ class ScanWorker {
     if (this.queue.some((j) => j.sessionId === sessionId && j.capture === capture)) return;
     this.queue.push({ sessionId, capture });
     this.pump();
+  }
+
+  /** Queue any capture the session says is waiting but the worker doesn't
+   *  know about (lost by an earlier failure), so nothing waits forever. */
+  resync(s: ScanSession) {
+    const missing = Object.values(s.captures)
+      .filter((c) => c.status === 'queued' || c.status === 'processing')
+      .filter((c) => !(this.current?.sessionId === s.id && this.current.capture === c.no))
+      .filter((c) => !this.queue.some((j) => j.sessionId === s.id && j.capture === c.no))
+      .sort((a, b) => a.no - b.no);
+    for (const c of missing) {
+      console.log(`[scan] capture ${c.no} was waiting but not queued: queuing it`);
+      this.enqueue(s.id, c.no);
+    }
   }
 
   counts(sessionId: string) {
@@ -136,13 +154,22 @@ class ScanWorker {
 
   private async dispatch(job: Job & { jobId: string }) {
     let cap: ScanCapture | undefined;
+    let saveError: unknown = null;
     const s = await updateSession(job.sessionId, (s) => {
       cap = s.captures[job.capture];
       if (cap && cap.status !== 'done') {
         cap.status = 'processing';
         cap.attempts = (cap.attempts ?? 0) + 1;
       }
-    }).catch(() => null);
+    }).catch((e) => { saveError = e; return null; });
+    if (!s && saveError && sessionExists(job.sessionId)) {
+      // the session is there but couldn't be saved right now: try again
+      // later instead of dropping the capture (it stayed "waiting" forever)
+      console.error('[scan] could not mark capture as processing, retrying', saveError);
+      this.current = null;
+      setTimeout(() => this.enqueue(job.sessionId, job.capture), RESTART_DELAY);
+      return;
+    }
     if (!s || !cap || cap.status !== 'processing') {
       // session deleted, or capture no longer pending
       this.current = null;
@@ -236,5 +263,7 @@ export const scanWorker: ScanWorker = (g.__scanWorker ??= (() => {
 
 export async function getSessionChecked(id: string) {
   await scanWorker.ensureStarted();
-  return readSession(id);
+  const s = await readSession(id);
+  if (s) scanWorker.resync(s);
+  return s;
 }

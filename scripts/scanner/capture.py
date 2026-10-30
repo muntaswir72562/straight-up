@@ -162,6 +162,70 @@ def _ink_mask(gray: np.ndarray) -> np.ndarray:
     return (norm < 170).astype(np.uint8)
 
 
+GAP_MIN_ASPECT = 1.05     # a text-gap spread must be clearly wider than tall
+GAP_MAX_INK = 0.5         # gap ink over the full height, relative to the emptier page
+                          # (lines curve into the gutter: the strips decide)
+GAP_MIN_TEXT = 0.03       # both pages must carry real text
+GAP_BAND = (0.35, 0.65)   # where the gap is searched
+GAP_MIN_FOLD = 0.03       # fold line darker than the gap's paper (flat sheet: < 0.02)
+
+
+def _text_gap_spine(gray, ink, ink_col, aspect, text_l, text_r):
+    """Spine of a book pressed flat: an empty vertical gap between two text
+    blocks with a faint fold line in it (where the pages meet). A loose
+    two-column sheet has the gap but no fold, so it is not split. Returns
+    (line coefficients x = c0*y + c1 in analysis pixels, confidence) or
+    None. The fold is traced strip by strip, so a tilted book is cut along it."""
+    h, w = ink.shape
+    if aspect < GAP_MIN_ASPECT or min(text_l, text_r) < GAP_MIN_TEXT:
+        return None
+    a, b = int(GAP_BAND[0] * w), int(GAP_BAND[1] * w)
+    xb = a + int(np.argmin(np.convolve(ink_col[a:b], np.ones(5) / 5, mode="same")))
+    if ink_col[xb] > GAP_MAX_INK * min(text_l, text_r):
+        return None
+    ys, xs, dips = [], [], []
+    text_strips = 0
+    sh = h / SPINE_STRIPS
+    for k in range(SPINE_STRIPS):
+        r0, r1 = int(k * sh), int((k + 1) * sh)
+        col = np.convolve(ink[r0:r1, a:b].mean(axis=0), np.ones(3) / 3, mode="same")
+        if col.max() < 0.05:   # no text in this strip (margin)
+            continue
+        text_strips += 1
+        c = int(np.argmin(np.convolve(col, np.ones(9) / 9, mode="same")))
+        if col[c] >= 0.02:
+            continue
+        lo, hi = c, c
+        while lo > 0 and col[lo - 1] < 0.02:
+            lo -= 1
+        while hi < len(col) - 1 and col[hi + 1] < 0.02:
+            hi += 1
+        if hi - lo < 4:
+            continue
+        prof = np.median(gray[r0:r1, a + lo:a + hi + 1].astype(np.float32), axis=0)
+        prof = np.convolve(prof, np.ones(3) / 3, mode="valid")
+        edge = max(prof[:2].max(), prof[-2:].max())
+        dips.append((edge - prof.min()) / max(edge, 1.0))
+        ys.append((r0 + r1) / 2.0)
+        xs.append(a + lo + 1 + float(np.argmin(prof)))
+    if len(ys) < 6 or float(np.median(dips)) < GAP_MIN_FOLD:
+        return None
+    ys, xs = np.array(ys), np.array(xs)
+    keep = np.ones(len(ys), bool)
+    for _ in range(3):   # robust: drop strips far from the fit
+        p1 = np.polyfit(ys[keep], xs[keep], 1)
+        res = np.abs(np.polyval(p1, ys) - xs)
+        keep = res < max(3.0, 2.5 * np.median(res[keep]))
+    if keep.sum() < max(6, 0.5 * text_strips):   # the fold must run down the page
+        return None
+    line = [float(c) for c in np.polyfit(ys[keep], xs[keep], 1)]
+    if abs(line[0]) > 0.05:   # over 3 degrees: not a book spine
+        return None
+    clean = keep.sum() / max(text_strips, 1)
+    conf = round(float(np.clip(0.55 + 0.25 * clean + 0.2 * np.clip((aspect - 1.05) / 0.3, 0, 1), 0, 0.95)), 3)
+    return line, conf
+
+
 def detect_spine(bgr: np.ndarray) -> Split:
     """Open book (two pages) or a single page / cover?
 
@@ -217,6 +281,16 @@ def detect_spine(bgr: np.ndarray) -> Split:
     why = (f"aspect={aspect:.2f} valley@{x0 / w:.2f} depth={depth:.3f} "
            f"text L/R={text_l:.3f}/{text_r:.3f} band={band_ink:.3f}")
     if not (both_text and clear_band and depth >= 0.03) or conf < SPINE_MIN_CONF:
+        # A book pressed flat under the IRIScan has almost no gutter shadow;
+        # then the spread shows as an empty vertical gap between two text
+        # blocks. A single page is portrait (handled above), so a wide crop
+        # with a clean gap and text on both sides is two pages.
+        gap = _text_gap_spine(gray, ink, ink_col, aspect, text_l, text_r)
+        if gap is not None:
+            xs_line, gconf = gap
+            n = len(xs_line) - 1
+            full = [float(c) * (s ** (n - k)) / s for k, c in enumerate(xs_line)]
+            return Split(True, gconf, "auto", spine=full, reason="text gap: " + why)
         return Split(False, round(1.0 - conf, 3), "auto", reason="no spine: " + why)
 
     # trace the valley strip by strip, within a window around x0
