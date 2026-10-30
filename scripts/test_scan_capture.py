@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fitz  # noqa: E402
 
 from scanner.capture import (  # noqa: E402
-    Options, detect_spine, find_book_region, process_capture, remove_fingers,
+    Options, clean_camera_page, detect_spine, find_book_region, process_capture, remove_fingers,
     skin_mask, split_spread, white_balance,
 )
 from scanner.scan_page import process_page_v2_bgr  # noqa: E402
@@ -288,6 +288,32 @@ class TestFingers(unittest.TestCase):
         self.assertLess(int((skin_mask(white_balance(out)) > 0).sum()), 0.02 * fm.sum())
 
 
+class TestCameraClean(unittest.TestCase):
+    """clean_camera_page: white paper, letters at full weight, tabs kept."""
+
+    def _camera_like(self):
+        page, tab = edge_tab(text_page(12, dpi=200))
+        g = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        g = cv2.GaussianBlur(g, (0, 0), 1.2)                         # camera softness
+        h, w = g.shape
+        g *= np.linspace(0.75, 1.0, w, dtype=np.float32)[None, :]    # shading
+        g = g * 0.85 + 20                                            # lower contrast
+        g += np.random.default_rng(1).normal(0, 6, g.shape)          # sensor grain
+        return np.clip(g, 0, 255).astype(np.uint8), tab
+
+    def test_paper_white_and_grain_gone(self):
+        g, tab = self._camera_like()
+        out = clean_camera_page(g)
+        paper = (cv2.dilate((g < 150).astype(np.uint8), np.ones((9, 9), np.uint8)) == 0) & ~tab
+        self.assertGreater(float(out[paper].mean()), 250)
+        self.assertLess(float((out[paper] < 200).mean()), 0.001)
+
+    def test_tab_stays_dark(self):
+        g, tab = self._camera_like()
+        out = clean_camera_page(g)
+        self.assertLess(float(np.median(out[tab])), 190)
+
+
 class TestDewarp(unittest.TestCase):
     def test_flat_page_not_bent(self):
         page = text_page(9, dpi=200)
@@ -405,6 +431,18 @@ class TestRealPhotos(unittest.TestCase):
                 border = np.zeros_like(m)
                 border[:b], border[-b:], border[:, :b], border[:, -b:] = True, True, True, True
                 self.assertLess(float(m[border].mean()), 0.002, f)
+
+    def test_clean_keeps_letter_weight(self):
+        # on a real camera page the flatbed clean washed letters out (letter
+        # pixels grey 93 -> 176); the camera clean must keep them darker
+        from clean_pdf import clean_page
+        from scanner.capture import split_spread as _split
+        for f, crop in self._each("spread_flat*.jpg"):
+            left, _ = _split(crop, detect_spine(crop).spine)
+            g = cv2.cvtColor(white_balance(left), cv2.COLOR_BGR2GRAY)
+            letters = cv2.dilate((g < 120).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+            old, new = clean_page(g)[letters].mean(), clean_camera_page(g)[letters].mean()
+            self.assertLess(new, old - 20, f"{f}: letters {new:.0f} vs old clean {old:.0f}")
 
     def test_tab_untouched(self):
         for f, crop in self._each("tab*.jpg"):

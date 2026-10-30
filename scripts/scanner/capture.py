@@ -423,6 +423,52 @@ def white_balance(bgr: np.ndarray, target: float = 245.0) -> np.ndarray:
     return out
 
 
+CLEAN_WHITE = 0.55   # white point: this far from the Otsu ink/paper split towards paper
+CLEAN_GAMMA = 1.5    # > 1 darkens the soft edges of letters (camera photos are softer than scans)
+SPECK_AREA = 14      # isolated dots up to this many px ...
+SPECK_DARK = 120     # ... and never darker than this are grain, not print
+CLEAN_BG_FLOOR = 0.5 # paper level is never taken below this share of the page's paper
+
+
+def clean_camera_page(gray: np.ndarray) -> np.ndarray:
+    """Clean for camera photos: white paper, no shading or bleed-through,
+    letters at full weight.
+
+    clean_pdf.clean_page is tuned for flatbed scans (sharp, high-contrast
+    print); on a camera page its white point turned the soft grey edges of
+    letters white, so text came out thin and pale (measured on IRIScan
+    photos). Here the paper is divided out with a wide closing, the white
+    point sits well above the ink/paper split, a gamma darkens the letter
+    edges, and the sensor grain the gentler levels leave is removed as
+    tiny light specks."""
+    from scipy import ndimage
+    h, w = gray.shape
+    k = max(31, int(0.02 * max(h, w)) | 1)   # wider than any letter
+    small = cv2.resize(gray, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+    ks = max(3, (k // 4) | 1)
+    bg = cv2.morphologyEx(cv2.GaussianBlur(small, (3, 3), 0), cv2.MORPH_CLOSE,
+                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks)))
+    bg = cv2.resize(cv2.GaussianBlur(bg, (0, 0), 3), (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    # never take something darker than half the paper for paper: a grey
+    # thumb-index tab or a solid block is wider than the kernel and would be
+    # whitened (gutter shading stays above this and is still evened out)
+    bg = np.maximum(bg, CLEAN_BG_FLOOR * float(np.percentile(bg, 90)))
+    norm = np.clip(gray.astype(np.float32) / np.maximum(bg, 1) * 255, 0, 255)
+    ink = norm[norm < 200]
+    black = float(np.percentile(ink, 3)) if ink.size > 1000 else 0.0
+    otsu, _ = cv2.threshold(norm.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    white = otsu + (255 - otsu) * CLEAN_WHITE
+    out = (255 * np.clip((norm - black) / max(white - black, 10), 0, 1) ** CLEAN_GAMMA).astype(np.uint8)
+    mask = (out < 215).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if n > 1:
+        darkest = ndimage.minimum(out, lab, np.arange(1, n))
+        kill = np.zeros(n, bool)
+        kill[1:] = (st[1:, cv2.CC_STAT_AREA] <= SPECK_AREA) & (np.asarray(darkest) > SPECK_DARK)
+        out[kill[lab]] = 255
+    return out
+
+
 def estimate_dpi(page_h_px: int) -> int:
     return int(np.clip(round(page_h_px / PAGE_HEIGHT_IN), 150, 600))
 
@@ -480,8 +526,7 @@ def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=N
     if colour:
         final = wb
     else:
-        from clean_pdf import clean_page
-        final = clean_page(gray)
+        final = clean_camera_page(gray)
     return final, gray, {"colour": bool(colour), "warnings": warnings}
 
 
