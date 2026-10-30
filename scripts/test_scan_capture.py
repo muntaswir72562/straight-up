@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fitz  # noqa: E402
 
 from scanner.capture import (  # noqa: E402
-    Options, clean_camera_page, detect_spine, find_book_region, process_capture, remove_fingers,
+    Options, clean_camera_page, detect_spine, find_book_region, process_capture, remove_fingers, remove_mat,
     skin_mask, split_spread, white_balance,
 )
 from scanner.scan_page import process_page_v2_bgr  # noqa: E402
@@ -286,6 +286,36 @@ class TestFingers(unittest.TestCase):
         out, _ = remove_fingers(page, "1")
         self.assertTrue(np.array_equal(out[tab], page[tab]))
         self.assertLess(int((skin_mask(white_balance(out)) > 0).sum()), 0.02 * fm.sum())
+
+
+class TestMat(unittest.TestCase):
+    """remove_mat: the black pad around the book goes, tabs and print stay."""
+
+    def test_mat_removed_tab_kept(self):
+        page, tab = edge_tab(text_page(13))
+        h, w = page.shape[:2]
+        mat = np.zeros((h, w), bool)
+        # pad showing in a corner and along the bottom (values as on IRIScan photos)
+        cv2.fillPoly(mat.view(np.uint8), [np.array([[0, h], [0, h - 260], [180, h]])], 1)
+        mat[h - 30:, :] = True
+        page[mat] = (2, 2, 1)
+        out, share = remove_mat(page)
+        self.assertGreater(share, 0.02)
+        self.assertGreater(float(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)[mat].mean()), 230)
+        self.assertTrue(np.array_equal(out[tab], page[tab]))
+        far = ~(cv2.dilate(mat.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+        self.assertTrue(np.array_equal(out[far], page[far]))
+
+    def test_dark_print_and_black_cover_kept(self):
+        page = text_page(14)
+        page[100:112, 0:10] = (5, 5, 5)          # a small black mark at the edge: print
+        out, share = remove_mat(page)
+        self.assertEqual(share, 0.0)
+        black_cover = np.full((900, 600, 3), (8, 8, 8), np.uint8)
+        cv2.putText(black_cover, "LAW", (150, 450), cv2.FONT_HERSHEY_TRIPLEX, 4, (60, 170, 210), 6)
+        out, share = remove_mat(black_cover)
+        self.assertEqual(share, 0.0)
+        self.assertTrue(np.array_equal(out, black_cover))
 
 
 class TestCameraClean(unittest.TestCase):

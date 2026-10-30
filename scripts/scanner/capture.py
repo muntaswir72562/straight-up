@@ -469,6 +469,45 @@ def clean_camera_page(gray: np.ndarray) -> np.ndarray:
     return out
 
 
+MAT_SEED = 12        # the black pad: darker than this (IRIScan photos: 0-13; grey tabs >= ~36)
+MAT_GROW = 28        # ... and the dark pixels joined to it, up to this
+MAT_MIN_AREA = 0.0005  # of the page: smaller dark bits at the edge are print, not pad
+MAT_MAX_AREA = 0.35    # larger ones are a black cover / illustration, not pad
+
+
+def remove_mat(bgr: np.ndarray):
+    """Paint the black pad (mat) around the book white: corners the crop
+    could not avoid, the notch beside the spine, the gap next to the page
+    stack. Only very dark regions that touch the page edge count, so the
+    grey thumb-index tab and dark print are kept. Returns (image, area share)."""
+    h, w = bgr.shape[:2]
+    v = bgr.max(axis=2)
+    seed = (v < MAT_SEED).astype(np.uint8)
+    if not seed.any():
+        return bgr, 0.0
+    grow = (v < MAT_GROW).astype(np.uint8)
+    grow = cv2.morphologyEx(grow, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(grow, 8)
+    if n < 2:
+        return bgr, 0.0
+    has_seed = np.zeros(n, bool)
+    has_seed[np.unique(lab[seed > 0])] = True
+    border = np.zeros(n, bool)
+    for edge in (lab[0, :], lab[-1, :], lab[:, 0], lab[:, -1]):
+        border[np.unique(edge)] = True
+    area = st[:, cv2.CC_STAT_AREA] / float(h * w)
+    keep = has_seed & border & (area >= MAT_MIN_AREA) & (area <= MAT_MAX_AREA)
+    keep[0] = False
+    if not keep.any():
+        return bgr, 0.0
+    mat = keep[lab]
+    # a few px more: the soft edge between pad and paper
+    mat = cv2.dilate(mat.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    out = bgr.copy()
+    out[mat] = paper_colour(bgr).astype(np.uint8)
+    return out, float(mat.mean())
+
+
 def estimate_dpi(page_h_px: int) -> int:
     return int(np.clip(round(page_h_px / PAGE_HEIGHT_IN), 150, 600))
 
@@ -516,6 +555,10 @@ def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=N
         step("dewarp")
         from scanner.scan_page import process_page_v2_bgr
         bgr = process_page_v2_bgr(bgr, idx, 0)
+    # the black pad around the book: always removed
+    bgr, mat_share = remove_mat(bgr)
+    if mat_share:
+        _log(f"page {label}: removed black mat ({mat_share * 100:.1f} % of the page)")
     step("colour")
     wb = white_balance(bgr)
     gray = cv2.cvtColor(wb, cv2.COLOR_BGR2GRAY)
