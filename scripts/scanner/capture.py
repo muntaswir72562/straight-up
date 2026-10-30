@@ -284,6 +284,7 @@ def split_spread(bgr: np.ndarray, spine: list | None):
 
 FINGER_BAND = 0.22        # fingers lie within this fraction of the page from its border
 FINGER_MIN_AREA = 0.0015  # of the page area
+FINGER_MAX_ALONG = 0.30   # fingers are short along the edge they hold; the page stack runs along it
 INPAINT_MAX_AREA = 0.004  # smaller regions are inpainted, larger ones filled with paper colour
 
 
@@ -303,6 +304,25 @@ def skin_mask(bgr: np.ndarray) -> np.ndarray:
     return m.astype(np.uint8) * 255
 
 
+def local_white(bgr: np.ndarray, kernel_frac: float = 0.25) -> np.ndarray:
+    """White balance done locally: each channel divided by a smooth paper
+    estimate (closing wider than any finger, then blurred). The IRIScan's
+    LED light is warmer in some parts of the page than others; after one
+    global correction, dark letters there looked skin-coloured."""
+    H, Wd = bgr.shape[:2]
+    S_ = 400
+    s = min(1.0, S_ / max(H, Wd))
+    small = cv2.resize(bgr, (max(1, int(Wd * s)), max(1, int(H * s))), interpolation=cv2.INTER_AREA).astype(np.float32)
+    k = max(3, int(kernel_frac * max(small.shape[:2])) | 1)
+    out = np.empty(bgr.shape, np.float32)
+    for c in range(3):
+        bg = cv2.morphologyEx(small[:, :, c], cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        bg = cv2.GaussianBlur(bg, (0, 0), k / 3)
+        bg = cv2.resize(bg, (Wd, H), interpolation=cv2.INTER_LINEAR)
+        out[:, :, c] = bgr[:, :, c].astype(np.float32) / np.maximum(bg, 1.0) * 245
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def remove_fingers(bgr: np.ndarray, page_label: str, gutter: str | None = None):
     """Paint out fingers holding the page down. Returns (image, warnings).
 
@@ -312,12 +332,14 @@ def remove_fingers(bgr: np.ndarray, page_label: str, gutter: str | None = None):
     the finger's shadow, unless text lies under/next to them: then only the
     finger pixels themselves are filled, and a warning is returned."""
     H, W = bgr.shape[:2]
-    wb = white_balance(bgr)
+    wb = local_white(bgr)
     s = min(1.0, WORK_SIDE / max(H, W))
     small = cv2.resize(wb, (max(1, int(W * s)), max(1, int(H * s))), interpolation=cv2.INTER_AREA)
     h, w = small.shape[:2]
     m = skin_mask(small)
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # a finger is a solid blob: thin shapes (letters, lines, colour fringes
+    # along print) are removed before looking for fingers
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
     edge = max(2, int(0.015 * max(h, w)))
@@ -344,6 +366,13 @@ def remove_fingers(bgr: np.ndarray, page_label: str, gutter: str | None = None):
         if touches[1]: reach.append((y + hh) / by)
         if touches[3]: reach.append((h - y) / by)
         if min(reach) > 1.0:
+            continue
+        # how far it runs along the edge(s) it touches: the brown page-stack
+        # strip at the outer edge is long and thin, fingers are not
+        along = []
+        if touches[0] or touches[2]: along.append(hh / h)
+        if touches[1] or touches[3]: along.append(ww / w)
+        if min(along) > FINGER_MAX_ALONG:
             continue
         fingers[lab == i] = 255
         found += 1
@@ -423,7 +452,7 @@ def white_balance(bgr: np.ndarray, target: float = 245.0) -> np.ndarray:
     return out
 
 
-CLEAN_WHITE = 0.55   # white point: this far from the Otsu ink/paper split towards paper
+CLEAN_WHITE = 0.75   # white point: this far from the Otsu ink/paper split towards paper (0.55 broke the hairlines of small print)
 CLEAN_GAMMA = 1.5    # > 1 darkens the soft edges of letters (camera photos are softer than scans)
 SPECK_AREA = 14      # isolated dots up to this many px ...
 SPECK_DARK = 120     # ... and never darker than this are grain, not print
@@ -508,6 +537,39 @@ def remove_mat(bgr: np.ndarray):
     return out, float(mat.mean())
 
 
+def is_colour_camera_page(bgr: np.ndarray) -> bool:
+    """Should Clean keep this camera page in colour (cover, illustration)?
+
+    fullfix_pdf.is_color_page took IRIScan text pages for colour pages, so
+    they were never cleaned (grey, pale): the LED cast varies across the
+    page (one global white balance leaves part of it tinted), and the camera
+    puts thin colour fringes along black letters. Here the cast is divided
+    out per channel with a smooth, local paper estimate, the outer edges
+    (page stack, gutter) are ignored, and only solid coloured areas count,
+    not thin fringes. Covers whose paper is itself coloured are colour."""
+    h, w = bgr.shape[:2]
+    W = 600
+    small = cv2.resize(bgr, (W, max(1, int(W * h / w))), interpolation=cv2.INTER_AREA).astype(np.float32)
+    v = small.max(axis=2)
+    paper = np.median(small[v >= np.percentile(v, 70)], axis=0)
+    if (paper.max() - paper.min()) / max(float(paper.max()), 1.0) >= 0.4:
+        return True
+    k = int(0.08 * W) | 1
+    norm = np.empty_like(small)
+    for c in range(3):
+        bg = cv2.morphologyEx(small[:, :, c], cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        bg = cv2.GaussianBlur(bg, (0, 0), 20)
+        norm[:, :, c] = small[:, :, c] / np.maximum(bg, 1.0) * 255
+    norm = np.clip(norm, 0, 255)
+    ch = norm.max(axis=2) - norm.min(axis=2)
+    # ignore the outer edges: 15 % at the sides (the brown page-stack strip,
+    # the gutter), 4 % top and bottom
+    hh, ww = ch.shape
+    ch = ch[int(0.04 * hh):int(0.96 * hh), int(0.15 * ww):int(0.85 * ww)]
+    solid = cv2.morphologyEx((ch > 40).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    return bool(solid.mean() > 0.02)
+
+
 def estimate_dpi(page_h_px: int) -> int:
     return int(np.clip(round(page_h_px / PAGE_HEIGHT_IN), 150, 600))
 
@@ -537,7 +599,6 @@ def decide_split(crop: np.ndarray, opts: Options) -> Split:
 
 def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=None, gutter: str | None = None):
     """Steps 4-7 for one page. Returns (final image, ocr gray, info)."""
-    from fullfix_pdf import is_color_page
 
     def step(name):
         if progress:
@@ -565,7 +626,7 @@ def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=N
     if opts.color_mode == "colour":
         colour = True
     else:
-        colour = opts.keep_colour.get(idx, is_color_page(cv2.cvtColor(wb, cv2.COLOR_BGR2RGB)))
+        colour = opts.keep_colour.get(idx, is_colour_camera_page(bgr))
     if colour:
         final = wb
     else:
