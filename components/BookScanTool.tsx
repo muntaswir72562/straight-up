@@ -916,8 +916,9 @@ export function BookScanTool() {
     <>
     <main
       className={mode === 'scan'
-        // Scan Book fills the window exactly (only its page strip scrolls)
-        ? 'flex-1 w-full mx-auto px-4 sm:px-6 py-3 flex flex-col lg:h-dvh lg:overflow-hidden'
+        // Scan Book fills the window exactly (only its page strip scrolls).
+        // max-h: flex-1 alone lets main grow with the page strip
+        ? 'flex-1 w-full mx-auto px-4 sm:px-6 py-3 flex flex-col lg:h-dvh lg:max-h-dvh lg:overflow-hidden'
         : 'flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12'}
       style={{ maxWidth: mode === 'scan' ? '96rem' : '56rem' }}
     >

@@ -70,6 +70,8 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
   const [crops, setCrops] = useState<CropMap>(readCrops);
   const camKey = deviceId || 'default';
   const crop = crops[camKey] ?? { enabled: false, rect: DEFAULT_CROP };
+  // editing: full frame with the rectangle; otherwise only the crop is shown
+  const [editingCrop, setEditingCrop] = useState(false);
   const cropRef = useRef<CropRect | null>(null);
   useEffect(() => { cropRef.current = crop.enabled ? crop.rect : null; }, [crop.enabled, crop.rect]);
 
@@ -79,6 +81,27 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       if (save) { try { localStorage.setItem(CROP_KEY, JSON.stringify(all)); } catch { /* ignore */ } }
       return all;
     });
+  };
+
+  /** Whole frame letterboxed, or (crop on, not editing) only the crop, enlarged to fit. */
+  const videoPlacement = (): React.CSSProperties => {
+    const vw = state.kind === 'live' ? state.width : 0;
+    const vh = state.kind === 'live' ? state.height : 0;
+    if (!crop.enabled || editingCrop || !vw || !vh || !box.w || !box.h) {
+      return { inset: 0, width: '100%', height: '100%', objectFit: 'contain' };
+    }
+    const r = crop.rect;
+    const k = Math.min(box.w / (r.w * vw), box.h / (r.h * vh));
+    return {
+      left: (box.w - r.w * vw * k) / 2 - r.x * vw * k,
+      top: (box.h - r.h * vh * k) / 2 - r.y * vh * k,
+      width: vw * k,
+      height: vh * k,
+      objectFit: 'fill',
+      maxWidth: 'none',
+      // show nothing outside the crop (the box is rarely the crop's shape)
+      clipPath: `inset(${r.y * vh * k}px ${(1 - r.x - r.w) * vw * k}px ${(1 - r.y - r.h) * vh * k}px ${r.x * vw * k}px)`,
+    };
   };
 
   // size of the preview box: the crop rectangle is drawn over the shown frame
@@ -226,11 +249,28 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
             type="checkbox"
             className="focus-ring"
             checked={crop.enabled}
-            onChange={(e) => setCrop({ ...crop, enabled: e.target.checked }, true)}
+            onChange={(e) => {
+              setCrop({ ...crop, enabled: e.target.checked }, true);
+              setEditingCrop(e.target.checked); // turning it on: draw the rectangle first
+            }}
           />
           Crop area
         </label>
         {crop.enabled && (
+          <button
+            type="button"
+            onClick={() => setEditingCrop((v) => !v)}
+            className="focus-ring px-2 py-0.5 text-xs font-medium"
+            style={{
+              background: editingCrop ? 'var(--color-primary)' : 'transparent',
+              border: `1px solid ${editingCrop ? 'var(--color-primary)' : 'var(--color-border-strong)'}`,
+              borderRadius: 'var(--radius-sm)', color: editingCrop ? '#fff' : 'var(--color-ink)', cursor: 'pointer',
+            }}
+          >
+            {editingCrop ? 'Done' : 'Adjust crop'}
+          </button>
+        )}
+        {crop.enabled && editingCrop && (
           <button
             type="button"
             onClick={() => setCrop({ enabled: true, rect: DEFAULT_CROP }, true)}
@@ -252,9 +292,17 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
           ref={videoRef}
           muted
           playsInline
-          className="absolute inset-0 w-full h-full"
-          style={{ objectFit: 'contain', display: state.kind === 'live' ? 'block' : 'none' }}
+          className="absolute"
+          style={{ ...videoPlacement(), display: state.kind === 'live' ? 'block' : 'none' }}
         />
+        {state.kind === 'live' && crop.enabled && !editingCrop && (
+          <span
+            className="absolute left-2 top-2 px-2 py-0.5 text-[11px] font-medium pointer-events-none"
+            style={{ background: 'var(--color-accent)', color: '#1d1f2e', borderRadius: 'var(--radius-sm)' }}
+          >
+            Crop area only
+          </span>
+        )}
         {state.kind === 'starting' && (
           <div className="absolute inset-0 flex items-center justify-center text-sm" style={{ color: '#ccc' }}>
             Starting camera…
@@ -273,7 +321,7 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
             </button>
           </div>
         )}
-        {state.kind === 'live' && crop.enabled && state.width > 0 && state.height > 0 && box.w > 0 && (() => {
+        {state.kind === 'live' && crop.enabled && editingCrop && state.width > 0 && state.height > 0 && box.w > 0 && (() => {
           // where the letterboxed frame sits inside the preview box
           const k = Math.min(box.w / state.width, box.h / state.height);
           const w = state.width * k;

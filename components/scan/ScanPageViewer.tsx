@@ -14,14 +14,15 @@ const btn = {
 } as const;
 
 const GAP = 16;        // px between pages
-const MAX_WIDTH = 1400; // "fit width" never wider than this
-
-type Fit = 'page' | 'width';
+const ZOOM_MIN = 0.25;  // of "fit page"
+const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.25;
 
 /**
  * Page reader: every page of the book stacked vertically, scrolled with the
  * mouse wheel / scrollbar / keys. The toolbar acts on the page in view.
- * Keys: ← → or PgUp PgDn = previous / next page, Home / End, Esc = close.
+ * Keys: ← → or PgUp PgDn = previous / next page, Home / End, Esc = close,
+ * + / − / 0 = zoom in / out / fit page; Ctrl + mouse wheel zooms too.
  */
 export function ScanPageViewer({
   sessionId, pages, index, onClose, onOverride, onDelete,
@@ -40,7 +41,9 @@ export function ScanPageViewer({
   const [current, setCurrent] = useState(index);
   const currentRef = useRef(index);
   useEffect(() => { currentRef.current = current; }, [current]);
-  const [fit, setFit] = useState<Fit>('page');
+  // 1 = the whole page fits the window ("Fit page")
+  const [zoom, setZoom] = useState(1);
+  const zoomBy = (f: number) => setZoom((z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z * f)));
   const [box, setBox] = useState({ w: 1200, h: 700 });
 
   // size of the scroll area (pages are sized from it)
@@ -74,7 +77,20 @@ export function ScanPageViewer({
 
   // open at the requested page; keep the current page in view when the zoom
   // or the window size changes (page sizes change with both)
-  useEffect(() => { go(currentRef.current, false); }, [fit, box.w, box.h]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { go(currentRef.current, false); }, [zoom, box.w, box.h]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ctrl + wheel zooms (non-passive, so the browser doesn't zoom the whole app)
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      zoomBy(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -84,6 +100,9 @@ export function ScanPageViewer({
       else if (e.key === 'ArrowLeft' || e.key === 'PageUp') go(c - 1);
       else if (e.key === 'Home') go(0);
       else if (e.key === 'End') go(pages.length - 1);
+      else if (e.key === '+' || e.key === '=') zoomBy(ZOOM_STEP);
+      else if (e.key === '-' || e.key === '_') zoomBy(1 / ZOOM_STEP);
+      else if (e.key === '0') setZoom(1);
       else return;  // ↑ ↓ and the wheel scroll normally
       e.preventDefault();
       e.stopPropagation();
@@ -98,16 +117,18 @@ export function ScanPageViewer({
   const info = p.info;
   const b = badgeFor(p);
 
-  const sizeOf = (q: ScanPageView) => {
+  /** "Fit page" size of a page, times the zoom. */
+  const fitPage = (q: ScanPageView) => {
     const aspect = q.info ? q.info.width / q.info.height : 0.7;
-    if (fit === 'page') {
-      const h = Math.max(200, box.h - 2 * GAP);
-      const w = Math.min(h * aspect, box.w - 2 * GAP);
-      return { w, h: w / aspect };
-    }
-    const w = Math.max(200, Math.min(MAX_WIDTH, box.w - 2 * GAP - 16));
+    const h = Math.max(200, box.h - 2 * GAP);
+    const w = Math.min(h * aspect, box.w - 2 * GAP);
     return { w, h: w / aspect };
   };
+  const sizeOf = (q: ScanPageView) => {
+    const f = fitPage(q);
+    return { w: f.w * zoom, h: f.h * zoom };
+  };
+  const fitWidthZoom = Math.max(ZOOM_MIN, (box.w - 2 * GAP - 16) / Math.max(1, fitPage(p).w));
 
   return (
     <div
@@ -132,17 +153,12 @@ export function ScanPageViewer({
           </span>
         )}
         <div className="flex-1" />
-        <div className="inline-flex p-0.5" style={{ background: 'var(--color-surface-inset)', borderRadius: 'var(--radius-md)' }} role="group" aria-label="Zoom">
-          {(['page', 'width'] as const).map((f) => (
-            <button key={f} type="button" onClick={() => setFit(f)} className="focus-ring px-2.5 py-1 text-xs font-medium"
-              style={{
-                background: fit === f ? 'var(--color-primary)' : 'transparent',
-                color: fit === f ? '#fff' : 'var(--color-ink-muted)',
-                border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-              }}>
-              {f === 'page' ? 'Fit page' : 'Fit width'}
-            </button>
-          ))}
+        <div className="inline-flex items-center gap-0.5 p-0.5" style={{ background: 'var(--color-surface-inset)', borderRadius: 'var(--radius-md)' }} role="group" aria-label="Zoom">
+          <button type="button" onClick={() => zoomBy(1 / ZOOM_STEP)} className="focus-ring px-2 py-1 text-sm font-semibold" style={zoomBtn(false)} aria-label="Zoom out" title="Zoom out (−, Ctrl + wheel)">−</button>
+          <span className="px-1 text-xs tabular-nums" style={{ color: 'var(--color-ink)', minWidth: '3rem', textAlign: 'center' }}>{Math.round(zoom * 100)}%</span>
+          <button type="button" onClick={() => zoomBy(ZOOM_STEP)} className="focus-ring px-2 py-1 text-sm font-semibold" style={zoomBtn(false)} aria-label="Zoom in" title="Zoom in (+, Ctrl + wheel)">+</button>
+          <button type="button" onClick={() => setZoom(1)} className="focus-ring px-2.5 py-1 text-xs font-medium" style={zoomBtn(Math.abs(zoom - 1) < 0.01)} title="Whole page (0)">Fit page</button>
+          <button type="button" onClick={() => setZoom(fitWidthZoom)} className="focus-ring px-2.5 py-1 text-xs font-medium" style={zoomBtn(Math.abs(zoom - fitWidthZoom) < 0.01)}>Fit width</button>
         </div>
         {!p.rawDeleted && !p.placeholder && (
           <button type="button" className="focus-ring px-3 py-1.5" style={btn} onClick={() => onOverride(p, { rotate: 90 })}>Rotate ⟳</button>
@@ -168,8 +184,9 @@ export function ScanPageViewer({
         <p key={w} className="px-4 text-sm" style={{ color: 'oklch(85% 0.14 75)' }}>⚠ {w}</p>
       ))}
 
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto" style={{ overscrollBehavior: 'contain' }}>
-        <div className="flex flex-col items-center" style={{ gap: GAP, padding: GAP }}>
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto" style={{ overscrollBehavior: 'contain' }}>
+        {/* block layout: a page wider than the window scrolls sideways instead of being cut off */}
+        <div style={{ padding: GAP, width: 'max-content', minWidth: '100%' }}>
           {pages.map((q, i) => {
             const { w, h } = sizeOf(q);
             return (
@@ -177,8 +194,9 @@ export function ScanPageViewer({
                 key={q.id}
                 ref={(el) => { itemRefs.current[i] = el; }}
                 data-index={i}
-                className="relative flex items-center justify-center shrink-0"
+                className="relative flex items-center justify-center"
                 style={{
+                  margin: `0 auto ${GAP}px`,
                   width: w, height: h, background: q.status === 'done' ? '#fff' : 'oklch(30% 0.02 270)',
                   boxShadow: 'var(--shadow-lg)', outline: i === ci ? '2px solid var(--color-primary)' : 'none',
                   scrollMarginTop: GAP,
@@ -205,6 +223,14 @@ export function ScanPageViewer({
       </div>
     </div>
   );
+}
+
+function zoomBtn(active: boolean): React.CSSProperties {
+  return {
+    background: active ? 'var(--color-primary)' : 'transparent',
+    color: active ? '#fff' : 'var(--color-ink)',
+    border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+  };
 }
 
 /** Options of this one page: change them and re-run just this page. */
