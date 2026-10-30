@@ -258,6 +258,20 @@ class TestFingers(unittest.TestCase):
         self.assertGreater(int(ink.sum()), 20)
         self.assertGreater(float((g1[ink] < 128).mean()), 0.9)
 
+    def test_gutter_shadow_not_a_finger(self):
+        # warm grey gutter shadow along the spine side of a left page (colour
+        # measured on an IRIScan photo): neither the spine side nor this
+        # colour may be taken for a finger
+        page = text_page(9).astype(np.float32)
+        h, w = page.shape[:2]
+        ramp = np.clip((np.arange(w) - 0.93 * w) / (0.07 * w), 0, 1)[None, :, None]
+        shadow = np.array([139, 149, 169], np.float32)
+        page = (page * (1 - ramp) + shadow * ramp).astype(np.uint8)
+        for gutter in ("right", None):
+            out, warn = remove_fingers(page, "1", gutter)
+            self.assertEqual(warn, [])
+            self.assertTrue(np.array_equal(out, page), gutter)
+
     def test_edge_tab_untouched(self):
         page, tab = edge_tab(text_page(7))
         page = (page.astype(np.float32) * np.array(LED, np.float32)).astype(np.uint8)
@@ -361,27 +375,26 @@ class TestPipeline(unittest.TestCase):
 
 @unittest.skipUnless(os.path.isdir(REAL_DIR), "no real IRIScan photos in scripts/test_pages/scan")
 class TestRealPhotos(unittest.TestCase):
-    def _each(self, pattern):
-        files = sorted(glob.glob(os.path.join(REAL_DIR, pattern)))
+    def _each(self, *patterns):
+        """Crops of every photo matching any pattern; skip only if there are none."""
+        files = sorted(f for p in patterns for f in glob.glob(os.path.join(REAL_DIR, p)))
         if not files:
-            self.skipTest(f"no {pattern}")
+            self.skipTest(f"no {' / '.join(patterns)}")
         for f in files:
             img = cv2.imread(f)
             (x0, y0, x1, y1), _ = find_book_region(img)
             yield f, img[y0:y1, x0:x1]
 
     def test_covers_and_loose_pages_not_split(self):
-        for pat in ("cover*.jpg", "loose*.jpg", "tab*.jpg"):
-            for f, crop in self._each(pat):
-                self.assertFalse(detect_spine(crop).spread, f)
+        for f, crop in self._each("cover*.jpg", "loose*.jpg", "tab*.jpg"):
+            self.assertFalse(detect_spine(crop).spread, f)
 
     def test_spreads_split(self):
-        for pat in ("spread_flat*.jpg", "spread_curved*.jpg", "fingers*.jpg"):
-            for f, crop in self._each(pat):
-                sp = detect_spine(crop)
-                self.assertTrue(sp.spread, f"{f}: {sp.reason}")
-                x = np.polyval(sp.spine, crop.shape[0] / 2)
-                self.assertTrue(0.3 * crop.shape[1] < x < 0.7 * crop.shape[1], f)
+        for f, crop in self._each("spread_flat*.jpg", "spread_curved*.jpg", "fingers*.jpg"):
+            sp = detect_spine(crop)
+            self.assertTrue(sp.spread, f"{f}: {sp.reason}")
+            x = np.polyval(sp.spine, crop.shape[0] / 2)
+            self.assertTrue(0.3 * crop.shape[1] < x < 0.7 * crop.shape[1], f)
 
     def test_fingers_removed(self):
         for f, crop in self._each("fingers*.jpg"):

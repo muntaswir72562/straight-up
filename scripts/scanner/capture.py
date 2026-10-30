@@ -182,25 +182,34 @@ def detect_spine(bgr: np.ndarray) -> Split:
     if aspect < 0.9:
         return Split(False, 0.95, "auto", reason=f"portrait (aspect {aspect:.2f})")
 
-    ink = _ink_mask(gray)
-    ink[: int(0.04 * h)], ink[-int(0.04 * h):] = 0, 0
     # paper brightness per column: a high percentile ignores the text
-    paper = np.percentile(gray, 75, axis=0).astype(np.float32)
-    paper = np.convolve(paper, np.ones(9) / 9, mode="same")
-    ink_col = np.convolve(ink.mean(axis=0), np.ones(5) / 5, mode="same")
+    paper_raw = np.percentile(gray, 75, axis=0).astype(np.float32)
+    paper = np.convolve(paper_raw, np.ones(9) / 9, mode="same")
 
     a, b = int(SPINE_BAND[0] * w), int(SPINE_BAND[1] * w)
     x0 = a + int(np.argmin(paper[a:b]))
     level = float(np.median(paper[int(0.1 * w):int(0.9 * w)]))
     depth = (level - paper[x0]) / max(level, 1.0)
 
-    # text-free band around the valley
-    gap = max(3, int(0.008 * w))
-    band_ink = float(ink_col[max(0, x0 - gap):x0 + gap + 1].mean())
-    text_l = float(ink_col[int(0.05 * w):max(int(0.05 * w) + 1, x0 - 3 * gap)].mean())
-    text_r = float(ink_col[min(w - 1, x0 + 3 * gap):int(0.95 * w)].mean())
+    # Text, with the gutter shading divided out column by column: in a real
+    # book the gutter is a narrow, very dark shadow that a local-contrast
+    # ink test reads as print (measured on IRIScan photos).
+    norm = gray.astype(np.float32) / np.maximum(paper_raw[None, :], 1.0)
+    ink = (norm < 0.6).astype(np.float32)
+    ink[: int(0.04 * h)], ink[-int(0.04 * h):] = 0, 0
+    ink_col = np.convolve(ink.mean(axis=0), np.ones(3) / 3, mode="same")
+
+    # the clearest narrow band near the valley (shadow and text gap need not
+    # line up exactly); real books print close to the gutter and curve into
+    # it, so the band only has to be clearly emptier than the pages
+    win = max(3, int(0.025 * w))
+    lo, hi = max(0, x0 - win), min(w, x0 + win)
+    xb = lo + int(np.argmin(ink_col[lo:hi]))
+    band_ink = float(ink_col[max(0, xb - 2):xb + 3].mean())
+    text_l = float(ink_col[int(0.05 * w):max(int(0.05 * w) + 1, lo)].mean())
+    text_r = float(ink_col[min(w - 1, hi):int(0.95 * w)].mean())
     both_text = min(text_l, text_r) > 0.012
-    clear_band = band_ink < 0.25 * min(text_l, text_r) + 0.002
+    clear_band = band_ink < 0.5 * min(text_l, text_r) + 0.002
 
     score_depth = np.clip((depth - 0.03) / 0.10, 0, 1)         # 3 % -> 0, 13 % -> 1
     score_aspect = np.clip((aspect - 0.95) / 0.35, 0, 1)        # 0.95 -> 0, 1.3 -> 1
@@ -287,12 +296,14 @@ def skin_mask(bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     y, cr, cb = ycc[:, :, 0], ycc[:, :, 1], ycc[:, :, 2]
     hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    m = ((cr >= 138) & (cr <= 180) & (cb >= 77) & (cb <= 130) & (y >= 50)
-         & ((hue <= 25) | (hue >= 165)) & (sat >= 35) & (val >= 70))
+    # Cr >= 143 / sat >= 55: the warm grey of a gutter shadow under the LED
+    # (measured Cr ~139, sat ~45 on IRIScan photos) is not skin
+    m = ((cr >= 143) & (cr <= 180) & (cb >= 77) & (cb <= 130) & (y >= 50)
+         & ((hue <= 25) | (hue >= 165)) & (sat >= 55) & (val >= 70))
     return m.astype(np.uint8) * 255
 
 
-def remove_fingers(bgr: np.ndarray, page_label: str):
+def remove_fingers(bgr: np.ndarray, page_label: str, gutter: str | None = None):
     """Paint out fingers holding the page down. Returns (image, warnings).
 
     Only skin-coloured blobs that touch the page border and stay within the
@@ -317,7 +328,13 @@ def remove_fingers(bgr: np.ndarray, page_label: str):
         x, y, ww, hh, area = st[i]
         if area < FINGER_MIN_AREA * h * w:
             continue
-        touches = (x <= edge, y <= edge, x + ww >= w - edge, y + hh >= h - edge)
+        touches = [x <= edge, y <= edge, x + ww >= w - edge, y + hh >= h - edge]
+        # a half of a spread: its spine side is the gutter, where fingers
+        # never are (only its shadow, which can look skin-coloured)
+        if gutter == "right":
+            touches[2] = False
+        elif gutter == "left":
+            touches[0] = False
         if not any(touches):
             continue
         # how far it reaches into the page, from the border(s) it touches
@@ -433,7 +450,7 @@ def decide_split(crop: np.ndarray, opts: Options) -> Split:
     return auto
 
 
-def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=None):
+def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=None, gutter: str | None = None):
     """Steps 4-7 for one page. Returns (final image, ocr gray, info)."""
     from fullfix_pdf import is_color_page
 
@@ -446,7 +463,8 @@ def finish_page(bgr: np.ndarray, idx: int, opts: Options, label: str, progress=N
     bgr = _rotate(bgr, opts.rotate.get(idx, 0))
     if opts.remove_fingers:
         step("fingers")
-        bgr, w = remove_fingers(bgr, label)
+        # after a rotation the gutter side is elsewhere: then check every side
+        bgr, w = remove_fingers(bgr, label, gutter if not opts.rotate.get(idx, 0) else None)
         warnings += w
     if opts.dewarp:
         step("dewarp")
@@ -503,7 +521,8 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
     for idx, part in enumerate(parts, start=1):
         pid = page_id(capture_no, idx)
         label = pid if len(parts) > 1 else f"{capture_no:04d}"
-        final, gray, info = finish_page(part, idx, opts, label, progress)
+        gutter = None if len(parts) == 1 else ("right" if idx == 1 else "left")
+        final, gray, info = finish_page(part, idx, opts, label, progress, gutter)
         dpi = estimate_dpi(final.shape[0])
         if progress:
             progress(f"ocr ({label})")
