@@ -445,6 +445,15 @@ class TestRealPhotos(unittest.TestCase):
         for f, crop in self._each("cover*.jpg", "loose*.jpg", "tab*.jpg"):
             self.assertFalse(detect_spine(crop).spread, f)
 
+    def test_page_never_cropped_by_straightening(self):
+        # on a real camera page detect_document found the text block, and
+        # rectify cut off the margins (margin numbers, page number) and bent
+        # the bottom lines; Scan Book must keep the whole cropped page
+        for f, _ in self._each("loose*.jpg", "tab*.jpg", "single*.jpg"):
+            page = cv2.imread(f)
+            out = process_page_v2_bgr(page)
+            self.assertEqual(out.shape, page.shape, f)
+
     def test_spreads_split(self):
         for f, crop in self._each("spread_flat*.jpg", "spread_curved*.jpg", "fingers*.jpg"):
             sp = detect_spine(crop)

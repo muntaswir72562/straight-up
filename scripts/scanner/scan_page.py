@@ -111,24 +111,28 @@ def process_page_v2(gray: np.ndarray, page_num: int = 0, total: int = 0) -> np.n
 
 
 def process_page_v2_bgr(bgr: np.ndarray, page_num: int = 0, total: int = 0) -> np.ndarray:
-    """Colour variant of process_page_v2 (Scan Book): the same steps, the
-    same skip rules, applied to a BGR image, so a colour page gets the same
-    detect -> rectify -> dewarp -> align_columns geometry. Returns BGR."""
-    # camera pages keep their full resolution (Full Book Fix caps at 3000 px)
-    return _v2_steps(bgr, f"[scan-v2] Page {page_num}/{total}", max_side=8000)
+    """Colour variant of process_page_v2 for Scan Book: dewarp ->
+    align_columns on a BGR image, with the same skip rules. Returns BGR.
+
+    No detect -> rectify: the overhead camera looks straight down and the
+    page is already cropped (crop rectangle or automatic crop). On camera
+    pages detect_document found the text block instead of the page (weak
+    Hough fit), and rectify then cut off the margins and gave the page a
+    false perspective that bent the bottom lines."""
+    return _v2_steps(bgr, f"[scan-v2] Page {page_num}/{total}", rectify_page=False)
 
 
-def _v2_steps(bgr: np.ndarray, tag: str, max_side: int = 3000) -> np.ndarray:
-    """detect -> rectify -> dewarp -> align_columns on a BGR image."""
+def _v2_steps(bgr: np.ndarray, tag: str, rectify_page: bool = True) -> np.ndarray:
+    """(detect -> rectify ->) dewarp -> align_columns on a BGR image."""
     # Step 1: Document boundary detection
-    det = detect_document(bgr)
+    det = detect_document(bgr) if rectify_page else None
 
     if det is not None:
         print(f"{tag}: detect={det.method} conf={det.confidence:.2f}", file=sys.stderr)
         # Step 2: Perspective rectification (Zhang & He true aspect ratio)
-        bgr = rectify(bgr, det.corners, max_side=max_side)
+        bgr = rectify(bgr, det.corners)
         print(f"{tag}: rectified", file=sys.stderr)
-    else:
+    elif rectify_page:
         print(f"{tag}: no document boundary detected, skipping rectify", file=sys.stderr)
 
     # Step 3: Polynomial text-line dewarping
