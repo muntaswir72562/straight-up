@@ -756,19 +756,26 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
     del crop
 
     remove_pages(pages_dir, capture_no)  # a reprocess may go from 2 pages to 1
-    metas = []
+    done = []
     for idx, part in enumerate(parts, start=1):
-        pid = page_id(capture_no, idx)
-        label = pid if len(parts) > 1 else f"{capture_no:04d}"
+        label = page_id(capture_no, idx) if len(parts) > 1 else f"{capture_no:04d}"
         gutter = None if len(parts) == 1 else ("right" if idx == 1 else "left")
-        final, gray, info = finish_page(part, idx, opts, label, progress, gutter)
+        done.append(finish_page(part, idx, opts, label, progress, gutter))
+    del parts
+    if len(done) == 2 and not any(opts.rotate.get(i, 0) % 360 for i in (1, 2)):
+        done = same_size_spread(done)
+
+    metas = []
+    for idx, (final, gray, info) in enumerate(done, start=1):
+        pid = page_id(capture_no, idx)
+        label = pid if len(done) > 1 else f"{capture_no:04d}"
         dpi = estimate_dpi(final.shape[0])
         if progress:
             progress(f"ocr ({label})")
         ocr = ocr_page(gray, page_num=idx, render_dpi=dpi)
         del gray
         meta = {
-            "id": pid, "capture": capture_no, "index": idx, "of": len(parts),
+            "id": pid, "capture": capture_no, "index": idx, "of": len(done),
             "width": int(final.shape[1]), "height": int(final.shape[0]), "dpi": dpi,
             "colour": info["colour"], "warnings": info["warnings"],
             "split": asdict(split),
@@ -780,7 +787,46 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
         }
         write_page(pages_dir, pid, final, ocr, meta)
         metas.append(meta)
+        done[idx - 1] = None  # free the page once written
     return metas
+
+
+SAME_SIZE_MAX_PAD = 0.35  # a half this much smaller than the other: something is off, leave it
+
+
+def _pad(img, left, right, top, bottom, fill):
+    if img.ndim == 2:
+        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=int(fill))
+    return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT,
+                              value=[int(v) for v in np.asarray(fill).ravel()[:3]])
+
+
+def same_size_spread(done):
+    """Give the two pages of a spread the same size. Each half is cut where
+    the spine is (often not the middle, or where the operator put the spine
+    line) and cropped on its own, so they come out in different sizes. The
+    smaller page gets paper added on its outer edge (away from the spine)
+    and evenly top and bottom; the letters keep their size and the gutter
+    edges stay where they are."""
+    H = max(d[0].shape[0] for d in done)
+    W = max(d[0].shape[1] for d in done)
+    out = []
+    for idx, (final, gray, info) in enumerate(done, start=1):
+        h, w = final.shape[:2]
+        if gray.shape[:2] != (h, w) or (H - h) > SAME_SIZE_MAX_PAD * H or (W - w) > SAME_SIZE_MAX_PAD * W:
+            return done
+        dw, dh = W - w, H - h
+        if not dw and not dh:
+            out.append((final, gray, info))
+            continue
+        left, right = (dw, 0) if idx == 1 else (0, dw)   # page 1's outer edge is its left
+        top, bottom = dh // 2, dh - dh // 2
+        fill = 255 if final.ndim == 2 else paper_colour(final)
+        paper = int(np.percentile(gray, 95))
+        out.append((_pad(final, left, right, top, bottom, fill),
+                    _pad(gray, left, right, top, bottom, paper), info))
+        _log(f"page {idx} of the spread: padded {dw}x{dh} px to match the other page")
+    return out
 
 
 # ── Disk ─────────────────────────────────────────────────────────────
