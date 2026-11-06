@@ -199,6 +199,26 @@ def _strip_old_text_layer(page):
         return False
 
 
+def _write_turned_word(page, txt, x0, y0, w_pt, h_pt, direction):
+    """Invisible text for a word printed sideways. Its box on the page is
+    tall and narrow: the letters are w_pt high and the word runs h_pt.
+    direction 90 = the word reads upwards, 270 = downwards."""
+    try:
+        fs = w_pt * 0.9
+        tl = fitz.get_text_length(txt, fontname='helv', fontsize=fs)
+        if tl > 0:
+            fs = max(1.0, min(fs * (h_pt / tl), w_pt))
+        if direction == 90:     # baseline on the right, starts at the bottom
+            pt = fitz.Point(x0 + w_pt * 0.85, y0 + h_pt)
+        else:                   # baseline on the left, starts at the top
+            pt = fitz.Point(x0 + w_pt * 0.15, y0)
+        page.insert_text(pt, txt, fontsize=fs, fontname='helv',
+                         rotate=direction, render_mode=3)
+        return True
+    except Exception:
+        return False
+
+
 def _build_searchable_pdf(output_path, ocr_results, ocr_page_set):
     """Overlay invisible OCR text on specific pages of the output PDF."""
     doc = fitz.open(output_path)
@@ -238,6 +258,12 @@ def _build_searchable_pdf(output_path, ocr_results, ocr_page_set):
                     w_pt = bw * sx
                     h_pt = bh * sy
                     if w_pt < 1 or h_pt < 1:
+                        continue
+                    if word.get('dir') in (90, 270):
+                        # printed sideways: write it turned the same way
+                        if _write_turned_word(page, txt, bx * sx, by * sy,
+                                              w_pt, h_pt, word['dir']):
+                            words_added += 1
                         continue
 
                     # Scale font so rendered width matches bbox width

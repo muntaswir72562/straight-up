@@ -23,6 +23,25 @@ from .correct import correct_words, join_hyphenated
 
 def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
     """
+    Run OCR on a grayscale page image, including text printed sideways
+    (tables turned 90 degrees on the page). See _ocr_page_upright for the
+    returned dict. Words read sideways carry 'dir': 90 (text runs upwards)
+    or 270 (downwards); their bbox is in page pixels like all others.
+    """
+    result = _ocr_page_upright(gray, page_num, render_dpi, lang)
+    try:
+        turn = _sideways_turn(gray, page_num, lang, render_dpi)
+        if turn is not None:     # ROTATE_90_CLOCKWISE is 0
+            result = _add_sideways_text(gray, result, turn, page_num,
+                                        render_dpi, lang)
+    except Exception as exc:          # never lose the upright reading
+        print(f'[ocr] Page {page_num}: sideways check failed: {exc}',
+              file=sys.stderr)
+    return result
+
+
+def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng'):
+    """
     Run OCR on a grayscale page image.
 
     Args:
@@ -169,6 +188,143 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
 
 
 # ── Layout helpers ──────────────────────────────────────────────────
+
+# ── Text printed sideways ───────────────────────────────────────────
+
+SIDEWAYS_MIN_VERTICAL = 0.6   # normal pages <= 0.51, sideways tables >= 0.82
+SIDEWAYS_MIN_LETTERS = 150
+SIDEWAYS_KEEP_CONF = 60       # upright words kept on a sideways page
+
+
+def _vertical_fraction(gray):
+    """Share of letters whose nearest neighbouring letter sits above or
+    below them rather than beside them. Text lines running across the
+    page give low values, text turned 90 degrees gives high values."""
+    from scipy.spatial import cKDTree
+    s = 1200.0 / gray.shape[0]
+    small = cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    bw = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    _, _, st, cen = cv2.connectedComponentsWithStats(bw, 8)
+    hh, ww, area = st[1:, 3], st[1:, 2], st[1:, 4]
+    keep = (hh >= 4) & (ww >= 2) & (hh <= 30) & (ww <= 30) & (area >= 6)
+    c = cen[1:][keep]
+    if len(c) < SIDEWAYS_MIN_LETTERS:
+        return 0.0
+    _, idx = cKDTree(c).query(c, k=2)
+    v = c[idx[:, 1]] - c
+    vert = np.abs(v[:, 1]) > np.abs(v[:, 0]) * 1.2
+    hor = np.abs(v[:, 0]) > np.abs(v[:, 1]) * 1.2
+    return float(vert.sum()) / max(1, int(vert.sum() + hor.sum()))
+
+
+def _read_score(img, lang, dpi):
+    words = extract_words(run_tesseract(img, lang=lang, psm=6, dpi=dpi), scale=1.0)
+    return sum(1 for w in words if w['conf'] >= 70
+               and sum(ch.isalnum() for ch in w['text']) >= 2)
+
+
+def _sideways_turn(gray, page_num, lang, render_dpi):
+    """None for a normal page; otherwise the cv2 rotation that turns the
+    sideways text upright (ROTATE_90_CLOCKWISE or ..._COUNTERCLOCKWISE),
+    chosen by test-reading the middle of the page both ways."""
+    frac = _vertical_fraction(gray)
+    if frac < SIDEWAYS_MIN_VERTICAL:
+        return None
+    H, W = gray.shape[:2]
+    crop = gray[int(H * 0.2):int(H * 0.8), int(W * 0.2):int(W * 0.8)]
+    cw = _read_score(cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE), lang, render_dpi)
+    ccw = _read_score(cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE), lang, render_dpi)
+    print(f'[ocr] Page {page_num}: text runs sideways ({frac:.2f}); '
+          f'test read cw={cw} ccw={ccw}', file=sys.stderr)
+    if max(cw, ccw) < 10:
+        return None
+    return cv2.ROTATE_90_CLOCKWISE if cw >= ccw else cv2.ROTATE_90_COUNTERCLOCKWISE
+
+
+def _unturn_box(b, turn, W, H):
+    """bbox read on the turned image -> bbox on the page."""
+    X, Y, w, h = b
+    if turn == cv2.ROTATE_90_CLOCKWISE:        # page (x, y) -> (H-1-y, x)
+        return [int(Y), int(H - (X + w)), int(h), int(w)]
+    return [int(W - (Y + h)), int(X), int(h), int(w)]   # (x, y) -> (y, W-1-x)
+
+
+def _add_sideways_text(gray, upright, turn, page_num, render_dpi, lang):
+    H, W = gray.shape[:2]
+    turned = _ocr_page_upright(cv2.rotate(gray, turn), page_num, render_dpi, lang)
+    direction = 90 if turn == cv2.ROTATE_90_CLOCKWISE else 270
+
+    side_blocks = []
+    for b in turned.get('blocks', []):
+        lines = []
+        for l in b.get('lines', []):
+            ws = []
+            for w in l.get('words', []):
+                w = dict(w)
+                w['bbox'] = _unturn_box(w['bbox'], turn, W, H)
+                w['dir'] = direction
+                ws.append(w)
+            if ws:
+                l = dict(l)
+                l['words'] = ws
+                l['bbox'] = _unturn_box(l['bbox'], turn, W, H)
+                l['dir'] = direction
+                lines.append(l)
+        if lines:
+            b = dict(b)
+            b['lines'] = lines
+            b['bbox'] = _unturn_box(b['bbox'], turn, W, H)
+            b['dir'] = direction
+            side_blocks.append(b)
+    if not side_blocks:
+        return upright
+
+    # where the sideways text is: the upright reading there is junk
+    mask = np.zeros((H, W), np.uint8)
+    for b in side_blocks:
+        for l in b['lines']:
+            for w in l['words']:
+                x, y, bw, bh = w['bbox']
+                mask[max(0, y):y + bh, max(0, x):x + bw] = 1
+    pad = max(3, int(round(turned.get('xh', 10) * 1.5)))
+    mask = cv2.dilate(mask, np.ones((2 * pad + 1, 2 * pad + 1), np.uint8))
+
+    up_blocks = []
+    for b in upright.get('blocks', []):
+        lines = []
+        for l in b.get('lines', []):
+            ws = []
+            for w in l.get('words', []):
+                x, y, bw, bh = w['bbox']
+                cx = min(W - 1, max(0, x + bw // 2))
+                cy = min(H - 1, max(0, y + bh // 2))
+                t = w.get('text', '')
+                if (mask[cy, cx] == 0 and w.get('conf', 0) >= SIDEWAYS_KEEP_CONF
+                        and any(ch.isalnum() for ch in t)):
+                    ws.append(w)
+            if ws:
+                l = dict(l)
+                l['words'] = ws
+                l['text'] = ' '.join(w['text'] for w in ws)
+                lines.append(l)
+        if lines:
+            b = dict(b)
+            b['lines'] = lines
+            b['text'] = '\n'.join(l['text'] for l in lines)
+            up_blocks.append(b)
+
+    result = dict(upright)
+    result['blocks'] = up_blocks + side_blocks
+    result['rotation'] = direction
+    parts = [b['text'] for b in up_blocks if b.get('text')]
+    parts += [b['text'] for b in side_blocks if b.get('text')]
+    result['text'] = '\n\n'.join(parts)
+    n_side = sum(len(l['words']) for b in side_blocks for l in b['lines'])
+    n_up = sum(len(l['words']) for b in up_blocks for l in b['lines'])
+    print(f'[ocr] Page {page_num}: read {n_side} sideways words, kept '
+          f'{n_up} upright words', file=sys.stderr)
+    return result
+
 
 def _flatten_paper(gray, render_dpi=200):
     """Divide the page by its paper level (large closing): white paper,
