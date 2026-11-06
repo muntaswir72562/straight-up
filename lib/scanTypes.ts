@@ -9,6 +9,9 @@ export interface CropRect {
   y: number;
   w: number;
   h: number;
+  /** Where the spine line was dragged to, as a fraction of the crop width
+   *  (0.1..0.9). Absent: the spine is found automatically. */
+  spine?: number;
 }
 
 export interface ScanOptions {

@@ -1,26 +1,33 @@
 'use client';
 
-import { useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import { useRef, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { CropRect } from '@/lib/scanTypes';
 
-type Handle = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+type Handle = 'move' | 'spine' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 
 const MIN = 0.05; // smallest crop side, as a fraction of the frame
 const HANDLE = 14; // px
+const SPINE_MIN = 0.1; // the spine line stays this far (fraction of the crop width) from the sides
+const SPINE_MAX = 0.9;
 
 const CURSOR: Record<Handle, string> = {
-  move: 'move', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+  move: 'move', spine: 'ew-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
   ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize',
 };
 
 function clampRect(r: CropRect): CropRect {
   const w = Math.min(Math.max(r.w, MIN), 1);
   const h = Math.min(Math.max(r.h, MIN), 1);
-  return { x: Math.min(Math.max(r.x, 0), 1 - w), y: Math.min(Math.max(r.y, 0), 1 - h), w, h };
+  return { ...r, x: Math.min(Math.max(r.x, 0), 1 - w), y: Math.min(Math.max(r.y, 0), 1 - h), w, h };
 }
 
 function resize(start: CropRect, handle: Handle, dx: number, dy: number): CropRect {
   if (handle === 'move') return clampRect({ ...start, x: start.x + dx, y: start.y + dy });
+  if (handle === 'spine') {
+    // dx is a fraction of the frame; the spine is a fraction of the crop width
+    const spine = Math.min(Math.max((start.spine ?? 0.5) + dx / start.w, SPINE_MIN), SPINE_MAX);
+    return { ...start, spine };
+  }
   let { x, y, w, h } = start;
   const right = x + w;
   const bottom = y + h;
@@ -28,7 +35,7 @@ function resize(start: CropRect, handle: Handle, dx: number, dy: number): CropRe
   if (handle.includes('e')) { w = Math.min(Math.max(start.w + dx, MIN), 1 - x); }
   if (handle.includes('n')) { y = Math.min(Math.max(start.y + dy, 0), bottom - MIN); h = bottom - y; }
   if (handle.includes('s')) { h = Math.min(Math.max(start.h + dy, MIN), 1 - y); }
-  return { x, y, w, h };
+  return { ...start, x, y, w, h };
 }
 
 /**
@@ -72,6 +79,14 @@ export function CropOverlay({
   const T = rect.y * area.height;
   const W = rect.w * area.width;
   const H = rect.h * area.height;
+  const spineAt = `${(rect.spine ?? 0.5) * 100}%`;
+  // double-click the line: back to the middle, spine found automatically
+  const resetSpine = (e: ReactMouseEvent) => {
+    e.stopPropagation();
+    const { spine: _spine, ...r } = rect; // eslint-disable-line @typescript-eslint/no-unused-vars
+    onChange(r);
+    onCommit(r);
+  };
   const handle = (h: Handle, left: number | string, top: number | string, w: number | string, hh: number | string, dot = false) => (
     <div
       key={h}
@@ -102,12 +117,28 @@ export function CropOverlay({
           boxShadow: '0 0 0 9999px oklch(0% 0 0 / 0.45)', // dims everything outside
         }}
       >
-        {/* centre line, to line up the spine of an open book; blue and 2px
-            so it shows on white paper as well as on the dark pad */}
+        {/* spine line, to line up the spine of an open book; blue and 2px
+            so it shows on white paper as well as on the dark pad. Drag it
+            to where the spine is: a two-page capture is split there. */}
         <div
-          className="absolute pointer-events-none"
-          style={{ left: '50%', top: 0, bottom: 0, transform: 'translateX(-1px)', borderLeft: '2px dashed oklch(62% 0.2 250)' }}
-        />
+          {...grip}
+          data-handle="spine"
+          onDoubleClick={resetSpine}
+          className="absolute"
+          style={{ left: spineAt, top: 0, bottom: 0, width: HANDLE, transform: 'translateX(-50%)', cursor: CURSOR.spine, touchAction: 'none' }}
+          title={rect.spine === undefined
+            ? "Spine line: drag it onto the book's spine; a two-page scan is split there"
+            : 'Spine line: two-page scans are split here. Double-click to reset to the middle'}
+        >
+          <div
+            className="absolute pointer-events-none"
+            style={{ left: '50%', top: 0, bottom: 0, transform: 'translateX(-1px)', borderLeft: `2px ${rect.spine === undefined ? 'dashed' : 'solid'} oklch(62% 0.2 250)` }}
+          />
+          <div
+            className="absolute pointer-events-none"
+            style={{ left: '50%', top: '50%', width: 10, height: 28, transform: 'translate(-50%, -50%)', background: '#fff', border: '2px solid oklch(62% 0.2 250)', borderRadius: 3 }}
+          />
+        </div>
         <span
           className="absolute left-1 top-1 px-1.5 py-0.5 text-[11px] font-medium pointer-events-none"
           style={{ background: 'var(--color-accent)', color: '#1d1f2e', borderRadius: 'var(--radius-sm)' }}

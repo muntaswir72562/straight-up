@@ -130,10 +130,11 @@ export const DEFAULT_OPTIONS: ScanOptions = {
 
 function validCrop(c: unknown): CropRect | null {
   if (!c || typeof c !== 'object') return null;
-  const { x, y, w, h } = c as Record<string, unknown>;
+  const { x, y, w, h, spine } = c as Record<string, unknown>;
   if (![x, y, w, h].every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
-  const r = { x: x as number, y: y as number, w: w as number, h: h as number };
+  const r: CropRect = { x: x as number, y: y as number, w: w as number, h: h as number };
   if (r.x < 0 || r.y < 0 || r.w < 0.05 || r.h < 0.05 || r.x + r.w > 1.0001 || r.y + r.h > 1.0001) return null;
+  if (typeof spine === 'number' && Number.isFinite(spine)) r.spine = Math.min(0.9, Math.max(0.1, spine));
   return r;
 }
 

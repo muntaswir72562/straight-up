@@ -43,7 +43,14 @@ def _valid_crop(c):
     w, h = min(w, 1.0 - x), min(h, 1.0 - y)
     if w < 0.05 or h < 0.05:
         return None
-    return {"x": x, "y": y, "w": w, "h": h}
+    out = {"x": x, "y": y, "w": w, "h": h}
+    try:
+        # where the operator dragged the spine line, as a fraction of the crop width
+        if c.get("spine") is not None:
+            out["spine"] = min(max(float(c["spine"]), 0.1), 0.9)
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def crop_box(shape, crop):
@@ -665,6 +672,15 @@ def decide_split(crop: np.ndarray, opts: Options) -> Split:
     if opts.split == "one":
         return Split(False, 1.0, "override")
     auto = detect_spine(crop)
+    manual = (opts.crop or {}).get("spine")
+    if manual is not None:
+        # the operator put the spine line there: cut straight down that line
+        x = float(manual) * crop.shape[1]
+        if opts.split == "two" or auto.spread:
+            return Split(True, 1.0 if opts.split == "two" else auto.confidence,
+                         "override" if opts.split == "two" else auto.source,
+                         spine=[x], reason=f"spine line at {manual:.2f}; {auto.reason}")
+        return auto
     if opts.split == "two":
         return Split(True, 1.0, "override", spine=auto.spine if auto.spread else None,
                      reason=auto.reason)
