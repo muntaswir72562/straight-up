@@ -102,8 +102,12 @@ export function CropOverlay({
           boxShadow: '0 0 0 9999px oklch(0% 0 0 / 0.45)', // dims everything outside
         }}
       >
-        {/* centre line, to line up the spine of an open book */}
-        <div className="absolute pointer-events-none" style={{ left: '50%', top: 0, bottom: 0, borderLeft: '1px dashed oklch(100% 0 0 / 0.55)' }} />
+        {/* centre line, to line up the spine of an open book; blue and 2px
+            so it shows on white paper as well as on the dark pad */}
+        <div
+          className="absolute pointer-events-none"
+          style={{ left: '50%', top: 0, bottom: 0, transform: 'translateX(-1px)', borderLeft: '2px dashed oklch(62% 0.2 250)' }}
+        />
         <span
           className="absolute left-1 top-1 px-1.5 py-0.5 text-[11px] font-medium pointer-events-none"
           style={{ background: 'var(--color-accent)', color: '#1d1f2e', borderRadius: 'var(--radius-sm)' }}
