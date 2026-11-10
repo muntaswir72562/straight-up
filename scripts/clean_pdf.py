@@ -74,6 +74,7 @@ JPEG_QUALITY = 90
 NO_PRINT_BLACK_PT = 170      # darkest print lighter than this = page without print (printed pages measure <= 132, blank backs >= 195)
 NO_PRINT_MARGIN = 15        # white point this far under the show-through level
 CLEAN_PAPER_BG = 248        # paper at least this white in the photo is already clean
+INK_EDGE = 160.0            # half-way dark letter edge in the photo: never lighter after the clean
 KEEP_INK_DARK = 110         # letter strokes: darker than this after paper normalisation
 KEEP_INK_RADIUS = _px(2)         # pixels this close to a letter stroke keep their photo darkness
 
@@ -297,7 +298,8 @@ def clean_page(gray):
     dark_pixels = ref[ref < otsu_val]
     black_pt = float(np.percentile(dark_pixels, 2)) if len(dark_pixels) > 100 else 0.0
     del dark_pixels, ref
-    if black_pt > NO_PRINT_BLACK_PT:
+    printless = black_pt > NO_PRINT_BLACK_PT
+    if printless:
         # No print on the page (a blank page, the back of a leaf): its
         # "darkest" marks are only show-through from the other side and paper
         # grain. Stretching them to black made blank pages grey and grainy
@@ -314,6 +316,30 @@ def clean_page(gray):
         (normalized.astype(np.float32) - black_pt) / (white_pt - black_pt) * 255,
         0, 255,
     ).astype(np.uint8)
+    # Letter edges keep their weight. Pages with little print and much
+    # show-through get a low Otsu white point, and bold print (a title, a
+    # logo) sets a very dark black point; then the regular text's stroke
+    # edges fall above the white point and are cut to white: the letters come
+    # out thin and pale ("washed"). Next to real letter strokes the white
+    # point is raised just enough that a pixel which is half-way dark in the
+    # photo (INK_EDGE) is not lighter after the clean, so letters keep the
+    # weight they have in the photo. Pages where the stretch already keeps
+    # that are unchanged, and paper, specks and show-through away from the
+    # letters are cleaned exactly as before.
+    ink_white = black_pt + (INK_EDGE - black_pt) * 255.0 / INK_EDGE
+    if not printless and ink_white > white_pt + 1:
+        sharp = cv2.divide(gray, bg, scale=255)
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * KEEP_INK_RADIUS + 1, 2 * KEEP_INK_RADIUS + 1))
+        near_ink = cv2.dilate((sharp < KEEP_INK_DARK).astype(np.uint8), k) > 0
+        del sharp
+        soft = np.clip(
+            (normalized.astype(np.float32) - black_pt) / (ink_white - black_pt) * 255,
+            0, 255,
+        ).astype(np.uint8)
+        keep = near_ink & (soft < stretched)
+        stretched[keep] = soft[keep]
+        del near_ink, soft, keep
     del normalized
 
     # Where the paper in the photo is already clean white, keep the letters as
