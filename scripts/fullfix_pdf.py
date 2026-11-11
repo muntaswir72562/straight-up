@@ -462,6 +462,241 @@ def run_ocr_phase(input_path, progress_file, total, do_v2, do_straighten,
 from pdf_out import _strip_old_text_layer, _build_searchable_pdf, _write_text_sidecar  # noqa: E402,F401
 
 
+# ── Same page size for the whole book ───────────────────────────────
+
+# Photographed books come out with every page a slightly different size
+# (each photo is cropped on its own) and some pages much smaller (taken from
+# further away). Every page is brought to one book size: scaled evenly until
+# it fills the book page, and the overflow trimmed from the edges. No white
+# space is added and letters keep their shape.
+# The trim never cuts into what is printed: the page's content (text, rules,
+# stamps, pictures, even faint print; not plain borders, and not marks
+# touching the photo's edge or lying in a thin strip along it) must stay
+# inside the trimmed page; the cut may sit off-centre to stay in the margin.
+# When there is not enough margin, nothing is cut: a page within 2 % of the
+# book's shape is stretched to it (invisible); any other page is scaled to
+# fit inside the book size and stays a little narrower or shorter.
+# A picture page (mostly dark: a cover photo) whose picture runs to the edge
+# is trimmed centred anyway: a picture can lose a sliver of its edge, text
+# can't. Text pages are never darker than this (their paper is light).
+# A landscape page in a portrait book gets the book size turned.
+BOOK_SIZE_MAX_TRIM = 0.15     # most a page may lose, across one dimension
+BOOK_SIZE_MAX_STRETCH = 0.02  # shape this close to the book's: stretched when it can't be trimmed
+BOOK_SIZE_TOLERANCE = 0.5     # pt: pages this close to the book size stay as they are
+CONTENT_WIDTH_PX = 270        # pages are looked at this wide to find their content
+CONTENT_CONTRAST = 48         # 3x3 grey range that counts as printed content (pictures)
+CONTENT_INK = 200             # darker than this, against the paper (255), counts as print
+CONTENT_MIN_AREA = 8          # px: smaller marks are specks (photo noise); a letter is >= 8
+CONTENT_EDGE = 0.015          # marks entirely in this strip along an edge are ignored
+CONTENT_PAD = 0.01            # keep this share of the page clear around the content
+PICTURE_MAX_MEDIAN = 128      # page median grey below this = picture page (covers 45-93, text pages >= 169)
+
+
+def _book_size(sizes):
+    """The book's page size: the median short and long side of its pages,
+    upright or across as most pages are."""
+    if not sizes:
+        return None
+    short = sorted(min(w, h) for w, h in sizes)
+    long_ = sorted(max(w, h) for w, h in sizes)
+    m = len(sizes) // 2
+    s = short[m] if len(sizes) % 2 else (short[m - 1] + short[m]) / 2.0
+    l = long_[m] if len(sizes) % 2 else (long_[m - 1] + long_[m]) / 2.0
+    across = sum(1 for w, h in sizes if w > h) > len(sizes) / 2.0
+    return (l, s) if across else (s, l)
+
+
+def _content_box(gray):
+    """Box (x0, y0, x1, y1) in 0..1 page fractions around the printed
+    content of a small grey image, or None for a page with nothing on it.
+
+    Content is anything clearly darker than the paper around it (after
+    evening out the paper shading, so faint print counts too) or with real
+    contrast (pictures). Each mark is judged on its own: marks touching the
+    image's edge (the photo's edge, the book's edge, the table, shadows) and
+    marks lying entirely in a thin strip along an edge are ignored. A line of
+    print running off the edge still has its other letters, so the box
+    reaches the edge and nothing there is trimmed."""
+    h, w = gray.shape[:2]
+    k = np.ones((3, 3), np.uint8)
+    bg = cv2.medianBlur(cv2.dilate(gray, np.ones((9, 9), np.uint8)), 15)
+    norm = cv2.divide(gray, bg, scale=255)
+    rng = cv2.dilate(gray, k).astype(np.int16) - cv2.erode(gray, k).astype(np.int16)
+    mask = ((norm < CONTENT_INK) | (rng > CONTENT_CONTRAST)).astype(np.uint8)
+    n, _, st, _ = cv2.connectedComponentsWithStats(mask, 8)
+    band = max(2, int(round(CONTENT_EDGE * w)))
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for i in range(1, n):
+        x, y, bw, bh, area = st[i]
+        if area < CONTENT_MIN_AREA:
+            continue                    # a speck
+        if x <= 0 or y <= 0 or x + bw >= w or y + bh >= h:
+            continue                    # touches the edge of the photo
+        if (x + bw <= band or x >= w - band
+                or y + bh <= band or y >= h - band):
+            continue                    # lies in the strip along an edge
+        xs0.append(x); ys0.append(y); xs1.append(x + bw); ys1.append(y + bh)
+    if not xs0:
+        return None
+    return (min(xs0) / w, min(ys0) / h, max(xs1) / w, max(ys1) / h)
+
+
+def _place(length, window, lo, hi):
+    """Start of a window of the given length on [0, length] that holds
+    [lo, hi], as near the centre as possible; None if it can't hold it."""
+    a, b = max(0.0, hi - window), min(length - window, lo)
+    if a > b + 1e-6:
+        return None
+    return min(max((length - window) / 2.0, a), b)
+
+
+def _fit_to_book(pw, ph, book_w, book_h, content=None, picture=False,
+                 max_trim=BOOK_SIZE_MAX_TRIM):
+    """How a pw x ph page fills the book size.
+
+    content: the printed content as 0..1 page fractions (None: nothing).
+    picture: a picture page (a cover photo), trimmed centred when its
+    picture runs to the edge.
+    Returns (target_w, target_h, (x0, y0, x1, y1)): the page size to use and
+    the part of the page shown on it (same shape as the target), or None
+    when the page is left as it is."""
+    if pw <= 0 or ph <= 0:
+        return None
+    if (pw > ph) != (book_w > book_h):
+        book_w, book_h = book_h, book_w        # landscape page: book turned
+    if (abs(pw - book_w) <= BOOK_SIZE_TOLERANCE
+            and abs(ph - book_h) <= BOOK_SIZE_TOLERANCE):
+        return None
+    pad = CONTENT_PAD
+    if pw / ph > book_w / book_h:              # wider: trim left and right
+        cw = ph * book_w / book_h
+        start = None
+        if 1.0 - cw / pw <= max_trim:
+            lo, hi = ((content[0] - pad) * pw, (content[2] + pad) * pw) if content else (pw / 2, pw / 2)
+            start = _place(pw, cw, lo, hi)
+            if start is None and picture:
+                start = (pw - cw) / 2.0         # picture page: trim centred
+        if start is not None:
+            return book_w, book_h, (start, 0.0, start + cw, ph)
+        if 1.0 - cw / pw <= BOOK_SIZE_MAX_STRETCH:
+            return book_w, book_h, (0.0, 0.0, pw, ph)   # tiny stretch
+        s = book_w / pw                        # not enough margin: fit inside
+    else:                                      # taller: trim top and bottom
+        ch = pw * book_h / book_w
+        start = None
+        if 1.0 - ch / ph <= max_trim:
+            lo, hi = ((content[1] - pad) * ph, (content[3] + pad) * ph) if content else (ph / 2, ph / 2)
+            start = _place(ph, ch, lo, hi)
+            if start is None and picture:
+                start = (ph - ch) / 2.0         # picture page: trim centred
+        if start is not None:
+            return book_w, book_h, (0.0, start, pw, start + ch)
+        if 1.0 - ch / ph <= BOOK_SIZE_MAX_STRETCH:
+            return book_w, book_h, (0.0, 0.0, pw, ph)   # tiny stretch
+        s = book_h / ph
+    tw, th = pw * s, ph * s
+    if abs(tw - pw) <= BOOK_SIZE_TOLERANCE and abs(th - ph) <= BOOK_SIZE_TOLERANCE:
+        return None
+    return tw, th, (0.0, 0.0, pw, ph)
+
+
+def _page_content(page):
+    """(content, picture) of a PDF page: its printed content as 0..1
+    fractions (see _content_box), and whether it is a picture page (mostly
+    dark, like a cover photo)."""
+    zoom = CONTENT_WIDTH_PX / max(1.0, page.rect.width)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY)
+    gray = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w)
+    return _content_box(gray), float(np.median(gray)) < PICTURE_MAX_MEDIAN
+
+
+def _scale_page_in_place(doc, page, target_w, target_h, clip):
+    """Resize a plain page by giving it the new size and putting one
+    scaling step in front of its content. Its images and (OCR) text stay on
+    the page itself, so later steps see an ordinary page. A turned page
+    (/Rotate) gets the turn put into its content first. Returns False when
+    the page is not plain (offset page box, links or notes)."""
+    if page.rotation:
+        try:
+            page.remove_rotation()
+        except Exception:
+            return False
+    mb = page.mediabox
+    if (page.rotation or abs(mb.x0) > 0.01 or abs(mb.y0) > 0.01
+            or abs(page.cropbox.width - mb.width) > 0.01
+            or abs(page.cropbox.height - mb.height) > 0.01
+            or page.first_annot is not None or page.get_links()):
+        return False
+    x0, y0, x1, y1 = clip
+    sx = target_w / (x1 - x0)
+    sy = target_h / (y1 - y0)
+    tx = -sx * x0
+    ty = -sy * (mb.height - y1)        # PDF space counts y from the bottom
+    old = page.get_contents()
+    pre = doc.get_new_xref()
+    doc.update_object(pre, '<<>>')
+    doc.update_stream(pre, (f'q {sx:.6f} 0 0 {sy:.6f} {tx:.4f} {ty:.4f} cm\n').encode())
+    post = doc.get_new_xref()
+    doc.update_object(post, '<<>>')
+    doc.update_stream(post, b'\nQ\n')
+    refs = ' '.join(f'{x} 0 R' for x in [pre] + list(old) + [post])
+    doc.xref_set_key(page.xref, 'Contents', f'[{refs}]')
+    page.set_mediabox(fitz.Rect(0, 0, target_w, target_h))
+    return True
+
+
+def resize_to_book(pdf_path):
+    """Bring every page of pdf_path to the book's page size (in place).
+    Returns the number of pages resized."""
+    doc = fitz.open(pdf_path)
+    sizes = [(p.rect.width, p.rect.height) for p in doc]
+    book = _book_size(sizes)
+    if book is None:
+        doc.close()
+        return 0
+    plans = []
+    for i, (w, h) in enumerate(sizes):
+        if _fit_to_book(w, h, *book) is None:      # already the book size
+            plans.append(None)
+            continue
+        content, picture = _page_content(doc[i])
+        plans.append(_fit_to_book(w, h, *book, content=content, picture=picture))
+    if not any(plans):
+        doc.close()
+        print(f"[fullfix] Resize: all pages already {book[0]:.0f} x {book[1]:.0f} pt",
+              file=sys.stderr)
+        return 0
+
+    nested = []
+    for i, plan in enumerate(plans):
+        if plan and not _scale_page_in_place(doc, doc[i], *plan):
+            nested.append(i)
+
+    if nested:
+        # pages that are not plain: shown through a new page of the book size
+        src = fitz.open(pdf_path)
+        for i in nested:
+            tw, th, clip = plans[i]
+            page = doc.new_page(i, width=tw, height=th)
+            page.show_pdf_page(page.rect, src, i, clip=fitz.Rect(*clip),
+                               keep_proportion=False)
+            doc.delete_page(i + 1)
+        src.close()
+
+    whole = [i + 1 for i, p in enumerate(plans)
+             if p and p[2] == (0.0, 0.0, sizes[i][0], sizes[i][1])
+             and {round(p[0], 1), round(p[1], 1)} != {round(book[0], 1), round(book[1], 1)}]
+    tmp_out = pdf_path + '.tmp'
+    doc.save(tmp_out, garbage=3, deflate=True)
+    doc.close()
+    os.replace(tmp_out, pdf_path)
+    n = sum(1 for p in plans if p)
+    print(f"[fullfix] Resize: {n} page(s) brought to {book[0]:.0f} x {book[1]:.0f} pt"
+          + (f"; not trimmed (content reaches the edge), fitted inside: {whole}" if whole else ''),
+          file=sys.stderr)
+    return n
+
+
 # ── Main pipeline ────────────────────────────────────────────────────
 
 def process_pdf(input_path, output_path, progress_file, book_name='fixed',
@@ -618,6 +853,7 @@ if __name__ == '__main__':
                 skip_dewarp.add(int(tok))
 
     do_audit = sys.argv[13] == '1' if len(sys.argv) > 13 else True
+    book_size = sys.argv[14] == '1' if len(sys.argv) > 14 else True
 
     has_processing = straighten or clean or dewarp or v2
 
@@ -664,6 +900,14 @@ if __name__ == '__main__':
                 _build_searchable_pdf(out, ocr_json_path)
                 _write_text_sidecar(ocr_json_path,
                                     os.path.join(tmp_dir, 'ocr_text.txt'))
+
+        # ── Same page size for the whole book ──────────────────────
+        if book_size:
+            try:
+                resize_to_book(out)
+            except Exception as e:
+                print(f"[fullfix] Resize failed, pages keep their sizes: {e}",
+                      file=sys.stderr)
 
         # ── Page audit ─────────────────────────────────────────────
         if do_audit:

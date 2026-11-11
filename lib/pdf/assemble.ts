@@ -1,4 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
+import { fitToBook, imageContentBox, type ContentBox } from './bookSize';
 
 export interface AssembleInput {
   /** Ordered list of PDF file bytes to merge */
@@ -28,6 +29,12 @@ export interface StraightenedPage {
   jpegBytes: Uint8Array;
   /** Original page size in PDF points (72pt = 1 inch) */
   pageSizePoints: { width: number; height: number };
+  /**
+   * pageSizePoints is the book's page size: the image fills it, scaled evenly
+   * and trimmed at the edges (never into its content), with no white space
+   * (see bookSize.ts). Without this the image is fitted inside the page.
+   */
+  fitToBook?: boolean;
 }
 
 export type AssemblePage = UntouchedPage | StraightenedPage;
@@ -70,6 +77,23 @@ export async function assemblePdf(
     } else {
       // Embed JPEG and create a page at the original size
       const jpegImage = await output.embedJpg(page.jpegBytes);
+
+      if (page.fitToBook) {
+        let content: ContentBox | null = [0, 0, 1, 1]; // could not look at it: never trim
+        let picture = false;
+        try {
+          const look = await imageContentBox(page.jpegBytes);
+          if (look) ({ content, picture } = look);
+        } catch {
+          // keep: never trim
+        }
+        const fit = fitToBook(jpegImage.width, jpegImage.height, page.pageSizePoints, content, picture);
+        const bookPage = output.addPage([fit.page.width, fit.page.height]);
+        bookPage.drawImage(jpegImage, fit.draw);
+        onProgress(i + 1, totalPages);
+        continue;
+      }
+
       const { width: pageW, height: pageH } = page.pageSizePoints;
 
       const pdfPage = output.addPage([pageW, pageH]);

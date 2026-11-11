@@ -37,6 +37,7 @@ class Lines:
 TABLE_LINES = True  # detect table grid lines (horizontal + vertical) for framing
 DROP_SLIVERS = True  # keep lone hair-thin marks (page-edge shadow) out of text lines
 LEFT_NEEDS_SUPPORT = True  # unconfirmed left-edge fit that disagrees with the right edge -> use right edge only
+INDENT_STEP_CHECK = True  # a left "margin" made of two straight groups at different indents is not a slant
 
 
 def find_lines(img: np.ndarray, work_side: int = 1600) -> Lines | None:
@@ -198,6 +199,31 @@ class AlignInfo:
     right_shift_px: float = 0.0
 
 
+def _indent_step(ys, xs, fit, tol, xh) -> bool:
+    """True when the points a left-edge fit rests on are two straight groups
+    at different indents (a jump of more than 2 letter heights between
+    neighbouring points, each group itself straight) rather than one
+    slanted or bowed margin."""
+    r = xs - np.polyval(fit[0], ys)
+    inl = np.abs(r) < tol
+    if inl.sum() < 6:
+        return False
+    o = np.argsort(ys[inl])
+    yi, xi = ys[inl][o], xs[inl][o]
+    k = int(np.argmax(np.abs(np.diff(xi))))
+    if abs(xi[k + 1] - xi[k]) <= 2.0 * xh:
+        return False
+    for gy, gx in ((yi[:k + 1], xi[:k + 1]), (yi[k + 1:], xi[k + 1:])):
+        if len(gx) < 3:
+            return False
+        p = np.polyfit(gy, gx, 1)
+        # the group's own edge must be straight up: over its span it moves
+        # less than the tolerance (a real slant would move it as well)
+        if abs(p[0]) * (gy[-1] - gy[0]) >= tol or np.ptp(gx - np.polyval(p, gy)) >= 2 * tol:
+            return False
+    return True
+
+
 def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarray, AlignInfo]:
     H, W = img.shape[:2]
     lines = lines or find_lines(img)
@@ -230,6 +256,12 @@ def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarr
             dd = np.polyval(fl[0], yy) - np.polyval(fd[0], yy)
             if np.ptp(dd) > tol:
                 fl = fd
+    # The left fit can also join two DIFFERENT margins when nothing else
+    # contradicts it: a paragraph flush left at the top and indented table
+    # rows below (x 142 then x 272) came out as one smooth "slant" and the
+    # lower half of the page was sheared like italics. A real slant or bow
+    # moves the margin gradually; an indent change is flat, then jumps.
+    step = _indent_step(ycl, allb[:, 0], fl, tol, lines.xh) if INDENT_STEP_CHECK else False
     # Right edge: long lines only, and a clear majority must sit on it. Tables
     # of contents, forms and ragged-right text have no real right edge, and
     # "straightening" a fake one stretches and cuts rows.
@@ -254,6 +286,11 @@ def align_columns(img: np.ndarray, lines: Lines | None = None) -> tuple[np.ndarr
             if np.ptp(np.polyval(fl[0], yy) - np.polyval(fr[0], yy)) > tol \
                     and np.ptp(np.polyval(fl[0], yl)) > np.ptp(np.polyval(fr[0], yr)):
                 left_ok = False
+
+    if step:
+        if fr is None:
+            return img, AlignInfo(False, "left margin changes indent")
+        left_ok = False           # take the slant from the right edge only
 
     y0, y1 = fl[1]
     ys = np.clip(np.arange(H, dtype=np.float64), y0, y1)  # never extrapolate the fit

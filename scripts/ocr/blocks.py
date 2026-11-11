@@ -29,24 +29,13 @@ def build_blocks(words, lines_info, table_cells, page_h, page_w):
     blocks = []
 
     # Table block (from per-cell OCR)
-    table_bbox = None
     if table_cells:
+        table_cells, words = _merge_into_table(table_cells, words)
         tb = _build_table_block(table_cells, page_h, page_w)
         blocks.append(tb)
-        table_bbox = tb['bbox']
 
     # Group OCR words into Tesseract's block → paragraph → line hierarchy
     tess_lines = _group_into_lines(words)
-    if table_bbox and blocks[0].get('lines'):
-        # the table's own (per-cell) words cover everything inside it: drop
-        # full-page lines whose centre lies inside the table, so no text is
-        # embedded twice
-        tx, ty, tw_, th_ = table_bbox
-        def _inside(l):
-            x, y, w, h = l['bbox']
-            cx, cy = x + w / 2.0, y + h / 2.0
-            return tx <= cx <= tx + tw_ and ty <= cy <= ty + th_
-        tess_lines = [l for l in tess_lines if not _inside(l)]
 
     # Body region from the scanner's text-line analysis
     body_y0, body_y1 = _body_region(lines_info, page_h, page_w)
@@ -56,11 +45,91 @@ def build_blocks(words, lines_info, table_cells, page_h, page_w):
 
     for group in line_groups:
         block = _classify_block(group, body_y0, body_y1, page_h)
-        if table_bbox and _overlaps_rect(block['bbox'], table_bbox, 0.5):
-            continue  # skip words that Tesseract read inside the table area
         blocks.append(block)
 
     return blocks
+
+
+# Words the full-page reading found inside the table, where the per-cell
+# reading found nothing, are added to the cell; this clearly read.
+TABLE_FILL_MIN_CONF = 60
+
+
+def _merge_into_table(table_cells, words):
+    """Share the page's words between the table and the rest of the page.
+
+    The per-cell reading covers only the area between the table's ruled
+    lines. Columns printed outside the rules (row numbers, years, a last
+    column with no line after it) and values the per-cell reading missed
+    used to be lost: every full-page line whose centre lay inside the table
+    was dropped, and with it the words of those columns on the same row.
+
+    Now, word by word:
+      - a word outside the ruled area stays with the page's text; on the
+        table's rows, words left and right of it become separate lines, so
+        a row never joins across the table;
+      - a word inside the ruled area is added to its cell when the per-cell
+        reading has nothing there (clearly read, with a letter or digit);
+        otherwise the per-cell words are kept, so nothing is embedded twice;
+      - a cell word that is only a sliver of an outside word, cut off by the
+        table's edge rule, gives way to that word.
+
+    Returns (table_cells, words_outside_the_table).
+    """
+    boxes = [c[3] for c in table_cells if c[3]]
+    if not boxes:
+        return table_cells, words
+    tx0 = min(b[0] for b in boxes)
+    ty0 = min(b[1] for b in boxes)
+    tx1 = max(b[0] + b[2] for b in boxes)
+    ty1 = max(b[1] + b[3] for b in boxes)
+
+    cells = [list(c[:4]) + [list(c[4]) if len(c) > 4 else []]
+             for c in table_cells]
+    cell_words = [w for c in cells for w in c[4]]
+
+    outside = []
+    for w in words:
+        x, y, bw, bh = w['bbox']
+        cx, cy = x + bw / 2.0, y + bh / 2.0
+        if not (tx0 <= cx <= tx1 and ty0 <= cy <= ty1):
+            if ty0 <= cy <= ty1:
+                w = dict(w)
+                side = 1 if cx < tx0 else 2
+                w['block_num'] = w['block_num'] + 10000 * side
+            outside.append(w)
+            continue
+        t = w['text'].strip()
+        if (w.get('conf', 0) < TABLE_FILL_MIN_CONF or not t
+                or not any(ch.isalnum() for ch in t)):
+            continue
+        if any(_overlaps_rect(w['bbox'], k['bbox'], 0.3)
+               or _overlaps_rect(k['bbox'], w['bbox'], 0.3)
+               for k in cell_words):
+            continue        # the per-cell reading has this word
+        for c in cells:
+            bx, by, bw_, bh_ = c[3]
+            if bx <= cx <= bx + bw_ and by <= cy <= by + bh_:
+                w = dict(w)
+                w['text'] = t
+                w['block_num'] = w['block_num'] + 20000
+                c[4].append(w)
+                c[4].sort(key=lambda k: (k['bbox'][1] + k['bbox'][3] / 2.0,
+                                         k['bbox'][0]))
+                c[2] = ' '.join(k['text'] for k in c[4])
+                cell_words.append(w)
+                break
+    # a sliver of an outside word cut off by the table's edge rule and read
+    # again in the edge cell ("|" glued to a letter): the outside word wins
+    for c in cells:
+        keep = [k for k in c[4]
+                if not any(_overlaps_rect(k['bbox'], o['bbox'], 0.5)
+                           and k.get('conf', 0) < o.get('conf', 0)
+                           for o in outside)]
+        if len(keep) != len(c[4]):
+            c[4] = keep
+            c[2] = ' '.join(k['text'] for k in keep)
+    return [tuple(c) for c in cells], outside
 
 
 # ── Tesseract hierarchy grouping ────────────────────────────────────

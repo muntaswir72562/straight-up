@@ -97,7 +97,7 @@ def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng'):
         print(f'[ocr] Page {page_num}: table detected ({n_grid} grid lines)',
               file=sys.stderr)
         table_cells = _ocr_table_cells(upscaled, table_grid_boxes, scale,
-                                        lang, dpi)
+                                        lang, dpi, xh_up=xh * scale)
 
     # ── Full-page OCR ───────────────────────────────────────────────
     try:
@@ -468,7 +468,13 @@ def _get_layout(gray):
     return xh, lines, grid
 
 
-def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi):
+# A word read in a table cell taller than this many letter heights is not
+# text: an empty cell with a speck in it was read as "B", "(ES" or "uo]"
+# with the size of the whole cell.
+TABLE_MAX_WORD_XH = 4.0
+
+
+def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi, xh_up=0.0):
     """
     OCR individual table cells from the grid.
 
@@ -547,6 +553,8 @@ def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi):
                     if w['conf'] < 30 and len(t) <= 2:
                         continue
                     bx, by, bw, bh = w['bbox']
+                    if xh_up > 0 and bh > TABLE_MAX_WORD_XH * xh_up:
+                        continue
                     # crop (upscaled, with margin) -> original page pixels
                     w = dict(w)
                     w['text'] = t

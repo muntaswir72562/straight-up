@@ -70,6 +70,7 @@ export function BookScanTool() {
   const [fullfixSkipDewarp, setFullfixSkipDewarp] = useState('');
   const [fullfixOcr, setFullfixOcr] = useState(false);
   const [fullfixAudit, setFullfixAudit] = useState(true);
+  const [fullfixBookSize, setFullfixBookSize] = useState(true);
 
   // --- Replace mode state ---
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -791,7 +792,7 @@ export function BookScanTool() {
           const name = entry.file.name.replace(/\.pdf$/i, '');
           result = await runFullfixPipeline(
             entry.file, name,
-            { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined, audit: fullfixAudit },
+            { straighten: fullfixStraighten, clean: fullfixClean, dewarp: fullfixDewarp, v2: fullfixV2, skipClean: fullfixSkipClean.trim() || undefined, ocr: fullfixOcr, skipStraighten: fullfixSkipStraighten.trim() || undefined, skipDewarp: fullfixSkipDewarp.trim() || undefined, audit: fullfixAudit, bookSize: fullfixBookSize },
             progressCb, cancelRef.current
           );
           setFixFiles((prev) =>
@@ -827,7 +828,7 @@ export function BookScanTool() {
         setStatus('error');
       }
     }
-  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, rotations, downloadUrl, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, downloadAuditTxt]);
+  }, [canStart, mode, slots, bookName, fixFile, fixPageCount, fixFiles, replaceFile, replacements, deletions, insertions, rotations, downloadUrl, fullfixStraighten, fullfixClean, fullfixDewarp, fullfixV2, fullfixSkipClean, fullfixSkipStraighten, fullfixSkipDewarp, fullfixOcr, fullfixAudit, fullfixBookSize, downloadAuditTxt]);
 
   // --- Cancel ---
   const handleCancel = useCallback(() => {
@@ -1266,11 +1267,11 @@ export function BookScanTool() {
               >
                 <input
                   type="checkbox"
-                  checked={fullfixV2 && fullfixClean && fullfixOcr && fullfixAudit}
+                  checked={fullfixV2 && fullfixClean && fullfixOcr && fullfixBookSize && fullfixAudit}
                   ref={(el) => {
                     if (el) {
-                      const count = [fullfixV2, fullfixClean, fullfixOcr, fullfixAudit].filter(Boolean).length;
-                      el.indeterminate = count > 0 && count < 4;
+                      const count = [fullfixV2, fullfixClean, fullfixOcr, fullfixBookSize, fullfixAudit].filter(Boolean).length;
+                      el.indeterminate = count > 0 && count < 5;
                     }
                   }}
                   onChange={(e) => {
@@ -1278,6 +1279,7 @@ export function BookScanTool() {
                     setFullfixV2(v);
                     setFullfixClean(v);
                     setFullfixOcr(v);
+                    setFullfixBookSize(v);
                     setFullfixAudit(v);
                   }}
                   disabled={locked}
@@ -1400,6 +1402,27 @@ export function BookScanTool() {
                 </span>
                 <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
                   Extract searchable text from scanned pages
+                </span>
+              </div>
+            </label>
+            <label
+              className="flex items-center gap-3 cursor-pointer select-none"
+              style={{ opacity: locked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={fullfixBookSize}
+                onChange={(e) => setFullfixBookSize(e.target.checked)}
+                disabled={locked}
+                className="accent-[var(--color-primary)]"
+                style={{ width: 18, height: 18 }}
+              />
+              <div className="flex flex-col">
+                <span className="text-sm" style={{ color: 'var(--color-ink)' }}>
+                  Same page size
+                </span>
+                <span className="text-xs" style={{ color: 'var(--color-ink-subtle)' }}>
+                  Bring every page to the book&apos;s page size, trimming only the margins
                 </span>
               </div>
             </label>
