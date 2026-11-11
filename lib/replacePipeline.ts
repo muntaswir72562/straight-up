@@ -1,5 +1,6 @@
 import { PDFDocument } from 'pdf-lib';
 import { assemblePdf, type AssemblePage } from './pdf/assemble';
+import { bookPageSize } from './pdf/bookSize';
 import { sanitizeBookName } from './filename';
 import { normalizeRotation, rotateImageBlob } from './pdf/rotate';
 import { JPEG_QUALITY, MAX_RENDER_DIMENSION, RENDER_DPI } from './constants';
@@ -390,22 +391,13 @@ export async function runReplacePipeline(
 
   if (cancelRef.cancelled) throw new Error('Cancelled');
 
-  // Helper: get page size for a given original page number (1-based)
-  const getPageSize = (pageNum: number) => {
-    const page = pdfDoc.getPage(pageNum - 1);
-    return page.getSize();
-  };
-
-  // Helper: get nearest page size for insertion point
-  const getNearestPageSize = (afterPage: number) => {
-    if (afterPage > 0 && afterPage <= totalPages) {
-      return getPageSize(afterPage);
-    }
-    if (totalPages > 0) {
-      return getPageSize(1);
-    }
-    return { width: 595, height: 842 }; // A4 fallback
-  };
+  // Replaced, inserted and rotated pages all get the book's page size (the
+  // median page size of the PDF), filled with no white space: scaled evenly,
+  // trimmed at the edges (see lib/pdf/bookSize.ts).
+  const bookSize =
+    bookPageSize(
+      pdfDoc.getPages().map((p) => rotatedSize(p.getSize(), p.getRotation().angle))
+    ) ?? { width: 595, height: 842 }; // A4 fallback
 
   // Build the assembly plan in output order
   const assemblePages: AssemblePage[] = [];
@@ -417,11 +409,11 @@ export async function runReplacePipeline(
   for (const ins of insertions.filter((i) => i.afterPage === 0)) {
     outputIndex++;
     const jpegBytes = convertedInsertions.get(ins.id)!;
-    const pageSize = rotatedSize(getNearestPageSize(0), ins.rotation ?? 0);
     assemblePages.push({
       kind: 'straightened',
       jpegBytes,
-      pageSizePoints: pageSize,
+      pageSizePoints: bookSize,
+      fitToBook: true,
     });
     ocrPageIndices.push(outputIndex);
     if (pdfInsertionIds.has(ins.id)) {
@@ -439,11 +431,11 @@ export async function runReplacePipeline(
 
       const replacementJpeg = convertedReplacements.get(pageNum);
       if (replacementJpeg) {
-        const { width, height } = rotatedSize(getPageSize(pageNum), rotations.get(pageNum) ?? 0);
         assemblePages.push({
           kind: 'straightened',
           jpegBytes: replacementJpeg,
-          pageSizePoints: { width, height },
+          pageSizePoints: bookSize,
+          fitToBook: true,
         });
         ocrPageIndices.push(outputIndex);
         if (pdfReplacementPages.has(pageNum)) {
@@ -458,11 +450,11 @@ export async function runReplacePipeline(
     for (const ins of insertions.filter((ins) => ins.afterPage === pageNum)) {
       outputIndex++;
       const jpegBytes = convertedInsertions.get(ins.id)!;
-      const pageSize = rotatedSize(getNearestPageSize(pageNum), ins.rotation ?? 0);
       assemblePages.push({
         kind: 'straightened',
         jpegBytes,
-        pageSizePoints: pageSize,
+        pageSizePoints: bookSize,
+        fitToBook: true,
       });
       ocrPageIndices.push(outputIndex);
       if (pdfInsertionIds.has(ins.id)) {
