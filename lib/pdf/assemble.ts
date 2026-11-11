@@ -79,13 +79,15 @@ export async function assemblePdf(
       const jpegImage = await output.embedJpg(page.jpegBytes);
 
       if (page.fitToBook) {
-        let content: ContentBox | null;
+        let content: ContentBox | null = [0, 0, 1, 1]; // could not look at it: never trim
+        let picture = false;
         try {
-          content = await imageContentBox(page.jpegBytes);
+          const look = await imageContentBox(page.jpegBytes);
+          if (look) ({ content, picture } = look);
         } catch {
-          content = [0, 0, 1, 1]; // could not look at it: never trim
+          // keep: never trim
         }
-        const fit = fitToBook(jpegImage.width, jpegImage.height, page.pageSizePoints, content);
+        const fit = fitToBook(jpegImage.width, jpegImage.height, page.pageSizePoints, content, picture);
         const bookPage = output.addPage([fit.page.width, fit.page.height]);
         bookPage.drawImage(jpegImage, fit.draw);
         onProgress(i + 1, totalPages);

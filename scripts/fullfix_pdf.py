@@ -617,6 +617,9 @@ def _write_text_sidecar(ocr_json_path, txt_path):
 # When there is not enough margin, nothing is cut: a page within 2 % of the
 # book's shape is stretched to it (invisible); any other page is scaled to
 # fit inside the book size and stays a little narrower or shorter.
+# A picture page (mostly dark: a cover photo) whose picture runs to the edge
+# is trimmed centred anyway: a picture can lose a sliver of its edge, text
+# can't. Text pages are never darker than this (their paper is light).
 # A landscape page in a portrait book gets the book size turned.
 BOOK_SIZE_MAX_TRIM = 0.15     # most a page may lose, across one dimension
 BOOK_SIZE_MAX_STRETCH = 0.02  # shape this close to the book's: stretched when it can't be trimmed
@@ -627,6 +630,7 @@ CONTENT_INK = 200             # darker than this, against the paper (255), count
 CONTENT_MIN_AREA = 8          # px: smaller marks are specks (photo noise); a letter is >= 8
 CONTENT_EDGE = 0.015          # marks entirely in this strip along an edge are ignored
 CONTENT_PAD = 0.01            # keep this share of the page clear around the content
+PICTURE_MAX_MEDIAN = 128      # page median grey below this = picture page (covers 45-93, text pages >= 169)
 
 
 def _book_size(sizes):
@@ -687,11 +691,13 @@ def _place(length, window, lo, hi):
     return min(max((length - window) / 2.0, a), b)
 
 
-def _fit_to_book(pw, ph, book_w, book_h, content=None,
+def _fit_to_book(pw, ph, book_w, book_h, content=None, picture=False,
                  max_trim=BOOK_SIZE_MAX_TRIM):
     """How a pw x ph page fills the book size.
 
     content: the printed content as 0..1 page fractions (None: nothing).
+    picture: a picture page (a cover photo), trimmed centred when its
+    picture runs to the edge.
     Returns (target_w, target_h, (x0, y0, x1, y1)): the page size to use and
     the part of the page shown on it (same shape as the target), or None
     when the page is left as it is."""
@@ -709,6 +715,8 @@ def _fit_to_book(pw, ph, book_w, book_h, content=None,
         if 1.0 - cw / pw <= max_trim:
             lo, hi = ((content[0] - pad) * pw, (content[2] + pad) * pw) if content else (pw / 2, pw / 2)
             start = _place(pw, cw, lo, hi)
+            if start is None and picture:
+                start = (pw - cw) / 2.0         # picture page: trim centred
         if start is not None:
             return book_w, book_h, (start, 0.0, start + cw, ph)
         if 1.0 - cw / pw <= BOOK_SIZE_MAX_STRETCH:
@@ -720,6 +728,8 @@ def _fit_to_book(pw, ph, book_w, book_h, content=None,
         if 1.0 - ch / ph <= max_trim:
             lo, hi = ((content[1] - pad) * ph, (content[3] + pad) * ph) if content else (ph / 2, ph / 2)
             start = _place(ph, ch, lo, hi)
+            if start is None and picture:
+                start = (ph - ch) / 2.0         # picture page: trim centred
         if start is not None:
             return book_w, book_h, (0.0, start, pw, start + ch)
         if 1.0 - ch / ph <= BOOK_SIZE_MAX_STRETCH:
@@ -732,11 +742,13 @@ def _fit_to_book(pw, ph, book_w, book_h, content=None,
 
 
 def _page_content(page):
-    """The printed content of a PDF page as 0..1 fractions (see _content_box)."""
+    """(content, picture) of a PDF page: its printed content as 0..1
+    fractions (see _content_box), and whether it is a picture page (mostly
+    dark, like a cover photo)."""
     zoom = CONTENT_WIDTH_PX / max(1.0, page.rect.width)
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY)
     gray = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w)
-    return _content_box(gray)
+    return _content_box(gray), float(np.median(gray)) < PICTURE_MAX_MEDIAN
 
 
 def _scale_page_in_place(doc, page, target_w, target_h, clip):
@@ -788,7 +800,8 @@ def resize_to_book(pdf_path):
         if _fit_to_book(w, h, *book) is None:      # already the book size
             plans.append(None)
             continue
-        plans.append(_fit_to_book(w, h, *book, content=_page_content(doc[i])))
+        content, picture = _page_content(doc[i])
+        plans.append(_fit_to_book(w, h, *book, content=content, picture=picture))
     if not any(plans):
         doc.close()
         print(f"[fullfix] Resize: all pages already {book[0]:.0f} x {book[1]:.0f} pt",

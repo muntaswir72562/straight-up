@@ -14,6 +14,9 @@
  * When there is not enough margin, nothing is cut: a page within 2 % of the
  * book's shape is stretched to it (invisible); any other page is scaled to
  * fit inside the book size and stays a little narrower or shorter.
+ * A picture page (mostly dark: a cover photo) whose picture runs to the edge
+ * is trimmed centred anyway: a picture can lose a sliver of its edge, text
+ * can't. Text pages are never darker than this (their paper is light).
  * A landscape page in a portrait book gets the book size turned.
  *
  * Same rule as resize_to_book in scripts/fullfix_pdf.py (Full Book Fix).
@@ -35,6 +38,7 @@ const CONTENT_INK = 200; // darker than this, against the paper (255), counts as
 const CONTENT_MIN_AREA = 8; // px: smaller marks are specks (photo noise)
 const CONTENT_EDGE = 0.015; // marks entirely in this strip along an edge are ignored
 const CONTENT_PAD = 0.01; // keep this share of the page clear around the content
+const PICTURE_MAX_MEDIAN = 128; // page median grey below this = picture page (covers 45-93, text pages >= 169)
 
 function median(sorted: number[]): number {
   const m = Math.floor(sorted.length / 2);
@@ -181,8 +185,39 @@ export function contentBox(gray: Uint8Array, w: number, h: number): ContentBox |
   return [bx0 / w, by0 / h, bx1 / w, by1 / h];
 }
 
-/** Content box of a JPEG (browser only: decodes it small on a canvas). */
-export async function imageContentBox(jpegBytes: Uint8Array): Promise<ContentBox | null> {
+/** Median grey of an image (the mean of the two middle values for an even count). */
+function medianGrey(gray: Uint8Array): number {
+  const hist = new Int32Array(256);
+  for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+  const lo = Math.floor((gray.length - 1) / 2);
+  const hi = Math.floor(gray.length / 2);
+  let c = 0;
+  let a = -1;
+  let b = -1;
+  for (let v = 0; v < 256; v++) {
+    c += hist[v];
+    if (a < 0 && c > lo) a = v;
+    if (c > hi) {
+      b = v;
+      break;
+    }
+  }
+  return (a + b) / 2;
+}
+
+/** Whether a small grey image is a picture page (mostly dark, like a cover photo). */
+export function isPicturePage(gray: Uint8Array): boolean {
+  return medianGrey(gray) < PICTURE_MAX_MEDIAN;
+}
+
+export interface ImageLook {
+  content: ContentBox | null;
+  picture: boolean;
+}
+
+/** Content box of a JPEG, and whether it is a picture page (browser only:
+ *  decodes it small on a canvas). */
+export async function imageContentBox(jpegBytes: Uint8Array): Promise<ImageLook | null> {
   const bitmap = await createImageBitmap(new Blob([jpegBytes as BlobPart], { type: 'image/jpeg' }));
   try {
     const w = CONTENT_WIDTH_PX;
@@ -200,7 +235,7 @@ export async function imageContentBox(jpegBytes: Uint8Array): Promise<ContentBox
     for (let i = 0; i < w * h; i++) {
       gray[i] = Math.round(0.299 * rgba[4 * i] + 0.587 * rgba[4 * i + 1] + 0.114 * rgba[4 * i + 2]);
     }
-    return contentBox(gray, w, h);
+    return { content: contentBox(gray, w, h), picture: isPicturePage(gray) };
   } finally {
     bitmap.close();
   }
@@ -228,8 +263,16 @@ function place(length: number, window: number, lo: number, hi: number): number |
 /**
  * How an image of imgW x imgH pixels fills a page of the book size.
  * content: the image's printed content (see contentBox); null = nothing on it.
+ * picture: a picture page (a cover photo), trimmed centred when its picture
+ * runs to the edge.
  */
-export function fitToBook(imgW: number, imgH: number, book: Size, content: ContentBox | null): BookFit {
+export function fitToBook(
+  imgW: number,
+  imgH: number,
+  book: Size,
+  content: ContentBox | null,
+  picture = false
+): BookFit {
   let bw = book.width;
   let bh = book.height;
   if (imgW > imgH !== bw > bh) [bw, bh] = [bh, bw]; // landscape page: book turned
@@ -244,6 +287,7 @@ export function fitToBook(imgW: number, imgH: number, book: Size, content: Conte
     if (1 - cw / imgW <= BOOK_SIZE_MAX_TRIM) {
       const [lo, hi] = content ? [(content[0] - pad) * imgW, (content[2] + pad) * imgW] : [imgW / 2, imgW / 2];
       start = place(imgW, cw, lo, hi);
+      if (start === null && picture) start = (imgW - cw) / 2; // picture page: trim centred
     }
     if (start !== null) clip = [start, 0, start + cw, imgH];
     else if (1 - cw / imgW <= BOOK_SIZE_MAX_STRETCH) clip = [0, 0, imgW, imgH]; // tiny stretch
@@ -255,6 +299,7 @@ export function fitToBook(imgW: number, imgH: number, book: Size, content: Conte
     if (1 - ch / imgH <= BOOK_SIZE_MAX_TRIM) {
       const [lo, hi] = content ? [(content[1] - pad) * imgH, (content[3] + pad) * imgH] : [imgH / 2, imgH / 2];
       start = place(imgH, ch, lo, hi);
+      if (start === null && picture) start = (imgH - ch) / 2; // picture page: trim centred
     }
     if (start !== null) clip = [0, start, imgW, start + ch];
     else if (1 - ch / imgH <= BOOK_SIZE_MAX_STRETCH) clip = [0, 0, imgW, imgH]; // tiny stretch
