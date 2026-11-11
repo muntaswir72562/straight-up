@@ -994,6 +994,7 @@ if __name__ == '__main__':
                 skip_dewarp.add(int(tok))
 
     do_audit = sys.argv[13] == '1' if len(sys.argv) > 13 else True
+    book_size = sys.argv[14] == '1' if len(sys.argv) > 14 else True
 
     has_processing = straighten or clean or dewarp or v2
 
@@ -1041,12 +1042,13 @@ if __name__ == '__main__':
                 _write_text_sidecar(ocr_json_path,
                                     os.path.join(tmp_dir, 'ocr_text.txt'))
 
-        # ── Same page size for the whole book (always on) ──────────
-        try:
-            resize_to_book(out)
-        except Exception as e:
-            print(f"[fullfix] Resize failed, pages keep their sizes: {e}",
-                  file=sys.stderr)
+        # ── Same page size for the whole book ──────────────────────
+        if book_size:
+            try:
+                resize_to_book(out)
+            except Exception as e:
+                print(f"[fullfix] Resize failed, pages keep their sizes: {e}",
+                      file=sys.stderr)
 
         # ── Page audit ─────────────────────────────────────────────
         if do_audit:

@@ -22,6 +22,7 @@ interface JobMetadata {
   skipStraighten: string;
   skipDewarp: string;
   audit: string;
+  bookSize: string;
 }
 
 interface Job {
@@ -48,6 +49,7 @@ function spawnPython(jobId: string, job: Job): void {
     scriptPath, inputPath, outputPath, progressPath,
     meta.bookName, meta.straighten, meta.clean, meta.dewarp, meta.v2,
     meta.skipClean, meta.ocr, meta.skipStraighten, meta.skipDewarp, meta.audit,
+    meta.bookSize,
   ], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -93,6 +95,7 @@ function extractMetadata(formData: FormData): JobMetadata {
     skipStraighten: (formData.get('skipStraighten') as string) || '',
     skipDewarp: (formData.get('skipDewarp') as string) || '',
     audit: formData.get('audit') === '0' ? '0' : '1',
+    bookSize: formData.get('bookSize') === '0' ? '0' : '1',
   };
 }
 
