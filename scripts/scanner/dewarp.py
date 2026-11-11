@@ -50,6 +50,10 @@ LEAD_NUMBERS = True  # sample a short number standing just left of a line ("4.  
 LEAD_TOL = 0.15      # ... its digits' bottoms agree with each other and with the line's baseline within this (letter heights)
 LEAD_MIN_DIST = 3.0  # ... and it stands at least this far (letter heights) left of the line's first sample
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
+FAR_PIECES = True  # a page whose lines are straight is still corrected when short pieces beyond the lines (amount columns at the page edge) curl (see _far_pieces)
+FAR_MIN_PIECES = 3  # ... at least this many such pieces
+FAR_MIN_MOVE = 0.25  # ... that the fitted field moves by at least this many letter heights (75th percentile)
+FAR_MAX_RESID = 0.15  # ... and only if the lines stay straight (rms residual, letter heights) and the pieces end up at most half as tilted
 TRACE_PIECES = True  # also measure short text pieces (a date column, a column of short entries) that are too short to be traced as lines
 JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_groups)
 VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to the traced span's ends (see _virtual_ext)
@@ -373,6 +377,39 @@ def _add_leads(traced, leads, xh):
             xs, ys = out[k]
             out[k] = (np.concatenate([px, xs]), np.concatenate([py, ys]))
     return out
+
+
+def _far_pieces(traced, n_main, line_id, Wt, D, resid, xh):
+    """How far the fitted field moves the short pieces standing beyond the
+    traced lines (left of all line starts or right of all line ends by more
+    than a letter height): (typical move, pieces' tilt before, after), in
+    work px; None with fewer than FAR_MIN_PIECES of them.
+
+    On a damages table the description column is straight while the amount
+    columns at the outer edge of the page curl up (each amount tilted by 1-4
+    degrees in the photo). The lines alone call the page straight; the
+    amounts are traced as pieces (tilt only, see _trace_piece), and the
+    field fitted through them moves them by this much. Before/after are the
+    pieces' rms departure from flat in the photo and after the fit."""
+    xm = np.concatenate([xs for xs, _ in traced[:n_main]])
+    x0, x1 = float(xm.min()), float(xm.max())
+    moves, b_dev, a_dev = [], [], []
+    for k in range(n_main, len(traced)):
+        xs, ys = traced[k]
+        cxp = float(np.mean(xs))
+        if x0 - xh <= cxp <= x1 + xh:
+            continue
+        m = (line_id == k) & (Wt == 1)
+        if m.sum() < 2:
+            continue
+        moves.append(float(np.mean(np.abs(D[m]))))
+        b_dev.extend(ys - ys.mean())
+        a_dev.extend(resid[m])
+    if len(moves) < FAR_MIN_PIECES:
+        return None
+    return (float(np.percentile(moves, 75)),
+            float(np.sqrt(np.mean(np.square(b_dev)))),
+            float(np.sqrt(np.mean(np.square(a_dev)))))
 
 
 def _lone_words(chars, idx, cx, cy, centres, bottoms, heights, line_of, long_blob, xh, w):
@@ -1031,10 +1068,21 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
                       debug_lines=[(xs / s, ys / s) for xs, ys in traced])
     # pages with few rows: a small measured bend is mostly noise (quotes,
     # italics, line-end marks), and correcting it bends headings around it
-    if before < (SPARSE_MIN_BEND if n_rows < SPARSE_ROWS else 0.2) * xh:
-        info.applied, info.reason = False, "page already straight"
-        return img, info
-    if after > 0.7 * before_rms:
+    straight = (SPARSE_MIN_BEND if n_rows < SPARSE_ROWS else 0.2) * xh
+    if before < straight:
+        # The text lines are straight, but a column standing beyond them
+        # (the amounts of a damages table at the outer edge of the page)
+        # can still curl: see _far_pieces. Correct the page only when such
+        # pieces would move noticeably and the fit flattens them while
+        # keeping the lines straight.
+        far = _far_pieces(traced, n_main, line_id, Wt, A @ coef, resid, xh) if FAR_PIECES and not _few else None
+        if far is None or far[0] < FAR_MIN_MOVE * xh:
+            info.applied, info.reason = False, "page already straight"
+            return img, info
+        if after > FAR_MAX_RESID * xh or far[2] > 0.5 * far[1]:
+            info.applied, info.reason = False, "fit not reliable"
+            return img, info
+    elif after > 0.7 * before_rms:
         info.applied, info.reason = False, "fit not reliable"
         return img, info
 
