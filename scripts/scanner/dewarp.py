@@ -46,7 +46,14 @@ RULE_MIN_W = 0.12  # shortest traced line, as a fraction of the page width (one 
 LEADER_INK = 0.5  # _extend_right only takes blobs at least this dark (fraction of the way from text ink to paper); 0 = off
 EXTEND_LEADERS = True  # follow dot leaders / end numbers past a line's last letter (see _extend_right)
 USE_PREFIX = True  # sample article numbers / list markers at line starts (see _trace_baselines)
+LEAD_NUMBERS = True  # sample a short number standing just left of a line ("4.  Psychiatric ...") on that line where nothing else is measured (see _lead_number, _add_leads)
+LEAD_TOL = 0.15      # ... its digits' bottoms agree with each other and with the line's baseline within this (letter heights)
+LEAD_MIN_DIST = 3.0  # ... and it stands at least this far (letter heights) left of the line's first sample
 EXTRAP_X = 6.0     # continue the field past the traced span along its edge slope for up to this many letter heights (0 = hold flat)
+FAR_PIECES = True  # a page whose lines are straight is still corrected when short pieces beyond the lines (amount columns at the page edge) curl (see _far_pieces)
+FAR_MIN_PIECES = 3  # ... at least this many such pieces
+FAR_MIN_MOVE = 0.25  # ... that the fitted field moves by at least this many letter heights (75th percentile)
+FAR_MAX_RESID = 0.15  # ... and only if the lines stay straight (rms residual, letter heights) and the pieces end up at most half as tilted
 TRACE_PIECES = True  # also measure short text pieces (a date column, a column of short entries) that are too short to be traced as lines
 JUMP_COLUMNS = True  # attach lone page numbers / dates to the line whose row they continue (see _attach_groups)
 VIRTUAL_EXT = 0.1  # weight of virtual samples continuing each line straight to the traced span's ends (see _virtual_ext)
@@ -136,6 +143,7 @@ def _trace_baselines(gray: np.ndarray):
 
     step = 2.0 * xh
     traced, pieces, groups, caps = [], [], [], []
+    leads = {}  # traced line -> samples of a number standing before it (see _lead_number)
     for i in range(1, n2):
         lx, ly, lw, lh, la = st2[i]
         if lw < 0.15 * w:
@@ -224,6 +232,10 @@ def _trace_baselines(gray: np.ndarray):
         if ok.sum() < 6:
             continue
         xs_out, ys_out = p[ok, 0], yv[ok]
+        if LEAD_NUMBERS and pre is None:
+            lead = _lead_number(i, lx, xs_out, ys_out, x, y, bw, bh, keep, lab2, st2, xh, w)
+            if lead is not None:
+                leads[len(traced)] = lead
         if pre is not None:
             xs_out = np.concatenate([[q[0] for q in pre], xs_out])
             ys_out = np.concatenate([[q[1] for q in pre], ys_out])
@@ -234,6 +246,8 @@ def _trace_baselines(gray: np.ndarray):
     # have no x-height letters, so they are never traced. On a page with only
     # one or two text lines they are the only other straight reference; add
     # them there. Full pages are unchanged.
+    if leads:
+        traced = _add_leads(traced, leads, xh)
     if caps and len(traced) + len(caps) < CAPS_MAX_ROWS:
         traced += caps
     if JUMP_COLUMNS and traced:
@@ -245,6 +259,157 @@ def _trace_baselines(gray: np.ndarray):
     if TRACE_RULES and table_grid(binv, xh):
         traced += _trace_rules(binv, xh)
     return traced, xh, pieces
+
+
+def _lead_number(i, lx, xs, ys, x, y, bw, bh, keep, lab2, st2, xh, w):
+    """A short number at the start of line i's row: the chapter numbers of a
+    contents page ("4.   Psychiatric and Psychological Damage").
+
+    Digits are taller than x-height, so they are never sampled as the line;
+    the line-start prefix needs >= 3 digits and _lone_words >= 2 glyphs, so a
+    one- or two-digit number was never measured. Where the lines above start
+    further left (the "FOREWORD" lines of the same contents page) the field
+    at the numbers was then only carried down the page from those rows and
+    drifted, lifting the numbers off their headings by up to 2/3 of a letter
+    height.
+
+    Taken: the row's leading word, at least LEAD_MIN_DIST letter heights left
+    of the line's first sampled letter (closer, the line's own samples hold
+    the field already), when it is 1-3 glyphs of digit height (1.25-1.9 letter heights; a full
+    stop may follow) with a word gap (0.6-4 letter heights) after it and
+    nothing on the row in the 3 letter heights before it, and no high mark
+    after it (an apostrophe: French "l'", "d'"); not part of another long
+    line; no taller than the capitals and ascenders of the line's own first
+    words (brackets of "(b)", "(ii)" are taller); its glyphs on one bottom
+    line that is the line's own baseline at its start (within LEAD_TOL
+    letter heights: a descender or an old-style figure is off it). Returns
+    baseline samples [(x, y)] or None."""
+    o = np.argsort(xs)
+    xs, ys = xs[o], ys[o]
+    near = xs <= xs[0] + 4 * xh
+    k = np.polyfit(xs[near], ys[near], 1) if near.sum() >= 2 else np.array([0.0, ys[0]])
+    if abs(k[0]) > 0.2:
+        k = np.array([0.0, ys[0]])
+    base0 = float(np.polyval(k, xs[0]))
+    right = x + bw
+    bottom = y + bh
+    row = keep & (np.abs(bottom - base0) < 1.0 * xh) & (x < xs[0]) & (right > xs[0] - 12 * xh)
+    big = row & (bh >= 0.55 * xh)                  # punctuation aside
+    j = np.nonzero(big)[0]
+    if not len(j):
+        return None
+    j = j[np.argsort(x[j])]
+    # the leading word: glyphs less than 0.6 letter heights apart
+    n = 1
+    while n < len(j) and x[j[n]] - right[j[n - 1]] < 0.6 * xh:
+        n += 1
+    word, rest = j[:n], j[n:]
+    if n > 3 or not np.all((bh[word] >= 1.25 * xh) & (bh[word] < 1.9 * xh)):
+        return None
+    nxt = x[rest[0]] if len(rest) else xs[0] - 0.5 * xh
+    gap = nxt - right[word].max()
+    if gap < 0.6 * xh or gap > 4.0 * xh:
+        return None
+    # only a full stop may follow the number: a high mark is an apostrophe
+    # (French "l'", "d'" before a word), so the "number" is a letter
+    small = keep & (bh < 0.55 * xh) & (x >= right[word].max() - 1) & (x < nxt)
+    small &= (bottom > base0 - 2.0 * xh) & (bottom < base0 + 0.5 * xh)
+    if np.any(small & (bottom < base0 - LEAD_TOL * xh)):
+        return None
+    # what follows the number up to the first sample is the line's own word
+    for jj in rest:
+        if lab2[int(y[jj] + bh[jj] / 2), int(x[jj] + bw[jj] / 2)] != i:
+            return None
+    # the number starts the row
+    if np.any(big & (right <= x[word].min()) & (right > x[word].min() - 3 * xh)):
+        return None
+    for jj in word:
+        bb = lab2[int(y[jj] + bh[jj] / 2), int(x[jj] + bw[jj] / 2)]
+        if bb and bb != i and st2[bb, 2] >= 0.15 * w:
+            return None                            # part of another line
+    # digits are as tall as the capitals (and ascenders) of the line's own
+    # first words; brackets ("(b)", "(ii)") are taller, from above the
+    # capitals to below the baseline
+    own = np.zeros(len(x), bool)
+    tallr = np.nonzero(keep & (bh >= 1.15 * xh) & (bh < 1.7 * xh) & (x >= xs[0] - 2 * xh) & (x < xs[0] + 15 * xh))[0]
+    for jj in tallr:
+        if (lab2[int(y[jj] + bh[jj] / 2), int(x[jj] + bw[jj] / 2)] == i
+                and abs(bottom[jj] - np.polyval(k, x[jj] + bw[jj] / 2.0)) < LEAD_TOL * xh):
+            own[jj] = True
+    if own.sum() < 2:
+        return None
+    if np.any(bh[word] > np.median(bh[own]) + 0.1 * xh):
+        return None
+    bt = bottom[word].astype(np.float64)
+    if np.ptp(bt) > LEAD_TOL * xh:
+        return None
+    cxs = x[word] + bw[word] / 2.0
+    if xs[0] - cxs.max() < LEAD_MIN_DIST * xh:
+        return None        # close to the line's own samples: they already hold the field there
+    if np.any(np.abs(bt - np.polyval(k, cxs)) > LEAD_TOL * xh):
+        return None
+    return [(float(cx), float(b)) for cx, b in zip(cxs, bt)]
+
+
+def _add_leads(traced, leads, xh):
+    """Add a line's lead number (see _lead_number) only where the field
+    would otherwise be unmeasured: no other line has a sample within
+    LEAD_MIN_DIST letter heights across and 8 letter heights up or down of
+    it. In a paragraph every line starts at the same margin, so a number
+    there is already held by its neighbours and nothing changes; on a
+    contents page the numbers' strip is only measured far above (the
+    "FOREWORD" lines), and there they are needed."""
+    allx = [xs for xs, _ in traced]
+    ally = [ys for _, ys in traced]
+    out = list(traced)
+    for k, pts in leads.items():
+        px = np.array([p[0] for p in pts])
+        py = np.array([p[1] for p in pts])
+        held = False
+        for m, (xs, ys) in enumerate(zip(allx, ally)):
+            if m == k:
+                continue
+            if np.any((np.abs(xs[:, None] - px[None, :]) < LEAD_MIN_DIST * xh)
+                      & (np.abs(ys[:, None] - py[None, :]) < 8.0 * xh)):
+                held = True
+                break
+        if not held:
+            xs, ys = out[k]
+            out[k] = (np.concatenate([px, xs]), np.concatenate([py, ys]))
+    return out
+
+
+def _far_pieces(traced, n_main, line_id, Wt, D, resid, xh):
+    """How far the fitted field moves the short pieces standing beyond the
+    traced lines (left of all line starts or right of all line ends by more
+    than a letter height): (typical move, pieces' tilt before, after), in
+    work px; None with fewer than FAR_MIN_PIECES of them.
+
+    On a damages table the description column is straight while the amount
+    columns at the outer edge of the page curl up (each amount tilted by 1-4
+    degrees in the photo). The lines alone call the page straight; the
+    amounts are traced as pieces (tilt only, see _trace_piece), and the
+    field fitted through them moves them by this much. Before/after are the
+    pieces' rms departure from flat in the photo and after the fit."""
+    xm = np.concatenate([xs for xs, _ in traced[:n_main]])
+    x0, x1 = float(xm.min()), float(xm.max())
+    moves, b_dev, a_dev = [], [], []
+    for k in range(n_main, len(traced)):
+        xs, ys = traced[k]
+        cxp = float(np.mean(xs))
+        if x0 - xh <= cxp <= x1 + xh:
+            continue
+        m = (line_id == k) & (Wt == 1)
+        if m.sum() < 2:
+            continue
+        moves.append(float(np.mean(np.abs(D[m]))))
+        b_dev.extend(ys - ys.mean())
+        a_dev.extend(resid[m])
+    if len(moves) < FAR_MIN_PIECES:
+        return None
+    return (float(np.percentile(moves, 75)),
+            float(np.sqrt(np.mean(np.square(b_dev)))),
+            float(np.sqrt(np.mean(np.square(a_dev)))))
 
 
 def _lone_words(chars, idx, cx, cy, centres, bottoms, heights, line_of, long_blob, xh, w):
@@ -903,10 +1068,21 @@ def dewarp(img: np.ndarray, work_side: int = 1600, _few: bool = False, _second: 
                       debug_lines=[(xs / s, ys / s) for xs, ys in traced])
     # pages with few rows: a small measured bend is mostly noise (quotes,
     # italics, line-end marks), and correcting it bends headings around it
-    if before < (SPARSE_MIN_BEND if n_rows < SPARSE_ROWS else 0.2) * xh:
-        info.applied, info.reason = False, "page already straight"
-        return img, info
-    if after > 0.7 * before_rms:
+    straight = (SPARSE_MIN_BEND if n_rows < SPARSE_ROWS else 0.2) * xh
+    if before < straight:
+        # The text lines are straight, but a column standing beyond them
+        # (the amounts of a damages table at the outer edge of the page)
+        # can still curl: see _far_pieces. Correct the page only when such
+        # pieces would move noticeably and the fit flattens them while
+        # keeping the lines straight.
+        far = _far_pieces(traced, n_main, line_id, Wt, A @ coef, resid, xh) if FAR_PIECES and not _few else None
+        if far is None or far[0] < FAR_MIN_MOVE * xh:
+            info.applied, info.reason = False, "page already straight"
+            return img, info
+        if after > FAR_MAX_RESID * xh or far[2] > 0.5 * far[1]:
+            info.applied, info.reason = False, "fit not reliable"
+            return img, info
+    elif after > 0.7 * before_rms:
         info.applied, info.reason = False, "fit not reliable"
         return img, info
 
