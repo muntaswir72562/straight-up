@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 import cv2
 
@@ -48,7 +49,25 @@ def _find_tesseract():
     return _TESSERACT_BIN
 
 
-def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=120):
+# A slow PC (2-core Celeron) needs minutes for one large page; the old 120 s
+# limit then failed the run and the page lost its whole text layer. The limit
+# only catches a hung process. STRAIGHTUP_TESSERACT_TIMEOUT overrides it.
+TIMEOUT = int(os.environ.get('STRAIGHTUP_TESSERACT_TIMEOUT', '600') or 600)
+
+# Tesseract runs and their time, for the timing line in the scan log
+STATS = {'runs': 0, 'seconds': 0.0}
+
+
+def _run(cmd, data, timeout):
+    t0 = time.time()
+    try:
+        return subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)
+    finally:
+        STATS['runs'] += 1
+        STATS['seconds'] += time.time() - t0
+
+
+def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=None):
     """
     Run Tesseract on a grayscale image via subprocess (stdin/stdout, no temp files).
 
@@ -57,7 +76,7 @@ def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=120):
         lang: Tesseract language string
         psm: page segmentation mode
         dpi: image resolution hint for Tesseract
-        timeout: subprocess timeout in seconds
+        timeout: subprocess timeout in seconds (None: TIMEOUT)
 
     Returns:
         List of parsed TSV row dicts (all levels).
@@ -76,13 +95,10 @@ def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=120):
         '--dpi', str(int(dpi)),
     ]
 
+    if timeout is None:
+        timeout = TIMEOUT
     try:
-        result = subprocess.run(
-            cmd,
-            input=png_buf.tobytes(),
-            capture_output=True,
-            timeout=timeout,
-        )
+        result = _run(cmd, png_buf.tobytes(), timeout)
     except FileNotFoundError:
         raise RuntimeError(
             'tesseract binary not found. '
@@ -96,6 +112,56 @@ def run_tesseract(gray, lang='fra+eng', psm=4, dpi=200, timeout=120):
         raise RuntimeError(f'Tesseract exited with code {result.returncode}: {stderr}')
 
     return _parse_tsv(result.stdout.decode('utf-8', errors='replace'))
+
+
+def run_tesseract_many(images, lang='fra+eng', psm=6, dpi=200, timeout=None):
+    """
+    Run Tesseract once on several small grayscale images (table cells).
+
+    The images go to one Tesseract process as the pages of a multi-page TIFF:
+    each page is read on its own, with the same settings as a separate run,
+    but the process start and the language models' load are paid once
+    instead of once per image. On a slow Windows PC, where every
+    tesseract.exe start is also checked by the antivirus, a table of 300
+    cells took minutes in starts alone.
+
+    Returns a list with each image's parsed TSV rows (as run_tesseract), or
+    None when this OpenCV can't write a multi-page TIFF (then the caller
+    reads the images one by one).
+    """
+    if not images:
+        return []
+    if not hasattr(cv2, 'imencodemulti'):
+        return None
+    ok, buf = cv2.imencodemulti('.tiff', list(images))
+    if not ok:
+        return None
+    tess_bin = _find_tesseract()
+    cmd = [
+        tess_bin, 'stdin', 'stdout',
+        '-l', lang,
+        '--oem', '1',
+        '--psm', str(psm),
+        '-c', 'tessedit_create_tsv=1',
+        '--dpi', str(int(dpi)),
+    ]
+    if timeout is None:
+        timeout = TIMEOUT + 5 * len(images)
+    try:
+        result = _run(cmd, buf.tobytes(), timeout)
+    except FileNotFoundError:
+        raise RuntimeError('tesseract binary not found.')
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f'Tesseract timed out after {timeout}s')
+    if result.returncode != 0:
+        stderr = result.stderr.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f'Tesseract exited with code {result.returncode}: {stderr}')
+    out = [[] for _ in images]
+    for row in _parse_tsv(result.stdout.decode('utf-8', errors='replace')):
+        k = row['page_num'] - 1
+        if 0 <= k < len(out):
+            out[k].append(row)
+    return out
 
 
 def _parse_tsv(tsv_text):
@@ -120,6 +186,7 @@ def _parse_tsv(tsv_text):
                 'height': int(row['height']),
                 'conf': int(float(row['conf'])),
                 'text': row.get('text', '').strip(),
+                'page_num': int(row.get('page_num') or 1),
             })
         except (ValueError, KeyError):
             continue

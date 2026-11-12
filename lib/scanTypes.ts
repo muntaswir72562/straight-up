@@ -2,6 +2,8 @@
 
 export type ColorMode = 'clean' | 'colour';
 export type SplitMode = 'auto' | 'one' | 'two';
+/** Processing speed: 'auto' = 'fast' on a slow PC (see lib/server/system.ts), else 'quality'. */
+export type ScanSpeed = 'auto' | 'quality' | 'fast';
 
 /** Crop area drawn on the camera preview, as fractions (0..1) of the photo. */
 export interface CropRect {
@@ -19,6 +21,8 @@ export interface ScanOptions {
   dewarp: boolean;
   removeFingers: boolean;
   split: SplitMode;
+  /** absent: 'auto' */
+  speed?: ScanSpeed;
   /** null/absent: find the page automatically */
   crop?: CropRect | null;
 }

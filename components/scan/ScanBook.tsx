@@ -11,7 +11,7 @@ import { ScanOptionsPanel } from './ScanOptionsPanel';
 import { PageStrip, type PageAction } from './PageStrip';
 import { ScanPageViewer } from './ScanPageViewer';
 
-const DEFAULT_OPTIONS: ScanOptions = { colorMode: 'clean', dewarp: true, removeFingers: true, split: 'auto' };
+const DEFAULT_OPTIONS: ScanOptions = { colorMode: 'clean', dewarp: true, removeFingers: true, split: 'auto', speed: 'auto' };
 const OPTIONS_KEY = 'straightup.scan.nextOptions';
 const UNTITLED = 'Untitled scan';
 const UPLOAD_RETRIES = 3;
@@ -67,6 +67,15 @@ export function ScanBook() {
   const [session, setSession] = useState<ScanSessionView | null>(null);
   const [bookName, setBookName] = useState('');
   const [nextOptions, setNextOptions] = useState<ScanOptions>(readOptions);
+  // what "Auto" speed means on this PC (null until known)
+  const [slowPc, setSlowPc] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch('/api/scan/system').then((r) => (r.ok ? r.json() : null))
+      .then((j: { slowPc?: boolean } | null) => { if (j && typeof j.slowPc === 'boolean') setSlowPc(j.slowPc); })
+      .catch(() => { /* stays Auto */ });
+  }, []);
+  const speed = nextOptions.speed ?? 'auto';
+  const lowPower = speed === 'fast' || (speed === 'auto' && slowPc === true);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(0);
   const [failed, setFailed] = useState<FailedUpload[]>([]);
@@ -446,10 +455,10 @@ export function ScanBook() {
       <div className="grid gap-4 flex-1 min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] lg:grid-rows-[minmax(0,1fr)]">
         {/* left: camera picker, options + Scan, live preview (fills the rest) */}
         <div className="flex flex-col min-h-0 min-w-0">
-          <CameraPreview ref={cameraRef} flashKey={flashKey}>
+          <CameraPreview ref={cameraRef} flashKey={flashKey} lowPower={lowPower}>
             <div className="mb-2 flex flex-wrap items-stretch gap-2">
               <div className="flex-1" style={{ minWidth: '20rem' }}>
-                <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} />
+                <ScanOptionsPanel options={nextOptions} onChange={changeNextOptions} slowPc={slowPc} />
               </div>
               <button
                 type="button"

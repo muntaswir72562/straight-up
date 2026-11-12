@@ -10,6 +10,13 @@ const JPEG_QUALITY = 0.95;
 const DEFAULT_CROP: CropRect = { x: 0.05, y: 0.05, w: 0.9, h: 0.9 };
 const VIEW_ZOOM_MAX = 8;
 const VIEW_ZOOM_STEP = 1.25;
+// Low-power preview (Speed "Fast" / a slow PC): the browser decodes every
+// preview frame on the CPU. At the camera's full size that kept the two cores
+// of a Celeron laptop busy while pages were being processed. The preview then
+// runs at most this wide and this often, in the full frame's shape; photos are
+// still taken at full size.
+const LOW_POWER_WIDTH = 1600;
+const LOW_POWER_FPS = 15;
 
 export interface CameraHandle {
   /** Full-resolution still as JPEG, and the crop area to use (null = automatic). */
@@ -57,9 +64,26 @@ function errorMessage(e: unknown): string {
   return `Could not start the camera: ${(e as Error)?.message || String(e)}`;
 }
 
+/** Wait (at most ms) until the video shows frames of the given width. */
+function waitForWidth(video: HTMLVideoElement, width: number, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (video.videoWidth === width) { resolve(true); return; }
+    const t = setTimeout(() => { video.removeEventListener('resize', on); resolve(video.videoWidth === width); }, ms);
+    const on = () => {
+      if (video.videoWidth === width) { clearTimeout(t); video.removeEventListener('resize', on); resolve(true); }
+    };
+    video.addEventListener('resize', on);
+  });
+}
+
 /** Camera picker, then `children` (options, Scan button), then the live preview filling the rest. */
-export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHandle>; flashKey: number; children?: ReactNode }) {
+export function CameraPreview({
+  ref, flashKey, lowPower = false, children,
+}: { ref?: Ref<CameraHandle>; flashKey: number; lowPower?: boolean; children?: ReactNode }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // full frame size, and the smaller preview size when lowPower (null: preview is full size)
+  const fullRef = useRef<{ w: number; h: number } | null>(null);
+  const lowRef = useRef<MediaTrackConstraints | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const photoRef = useRef<{ ic: ImageCaptureLike; w?: number; h?: number } | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -191,7 +215,32 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
       streamRef.current = stream;
       const track = stream.getVideoTracks()[0];
-      const s = track.getSettings();
+      let s = track.getSettings();
+      fullRef.current = s.width && s.height ? { w: s.width, h: s.height } : null;
+      lowRef.current = null;
+      if (lowPower && s.width && s.height && s.width > LOW_POWER_WIDTH) {
+        // a smaller camera mode of the same shape (same view, so the crop
+        // area still matches the photo); otherwise keep the full size
+        const low: MediaTrackConstraints = {
+          width: { ideal: LOW_POWER_WIDTH },
+          height: { ideal: Math.round((LOW_POWER_WIDTH * s.height) / s.width) },
+          frameRate: { ideal: LOW_POWER_FPS, max: LOW_POWER_FPS },
+        };
+        const full = { w: s.width, h: s.height };
+        try {
+          await track.applyConstraints(low);
+          const n = track.getSettings();
+          if (n.width && n.height && Math.abs(n.width / n.height - full.w / full.h) < 0.02) {
+            lowRef.current = low;
+            s = n;
+          } else {
+            await track.applyConstraints({ width: { ideal: full.w }, height: { ideal: full.h } });
+          }
+        } catch {
+          try { await track.applyConstraints({ width: { ideal: full.w }, height: { ideal: full.h } }); } catch { /* keep */ }
+        }
+        s = track.getSettings();
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play().catch(() => {});
@@ -220,7 +269,7 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       }
     })();
     return () => { cancelled = true; stop(); };
-  }, [deviceId, attempt, stop]);
+  }, [deviceId, attempt, stop, lowPower]);
 
   useEffect(() => {
     if (!flashKey) return;
@@ -238,7 +287,9 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
       // rectangle drawn on the preview covers the same part of the photo.
       const sameShape = !!p?.w && !!p?.h
         && Math.abs(p.w / p.h - video.videoWidth / video.videoHeight) < 0.02;
-      if (p && (p.w ?? 0) > video.videoWidth && (!crop || sameShape)) {
+      // (compared with the full video size: a low-power preview is smaller)
+      const fullW = Math.max(video.videoWidth, fullRef.current?.w ?? 0);
+      if (p && (p.w ?? 0) > fullW && (!crop || sameShape)) {
         try {
           const blob = await p.ic.takePhoto({ imageWidth: p.w, imageHeight: p.h });
           return { blob: blob.type === 'image/jpeg' ? blob : await reencode(blob), crop };
@@ -246,11 +297,30 @@ export function CameraPreview({ ref, flashKey, children }: { ref?: Ref<CameraHan
           /* some UVC drivers refuse takePhoto: use the video frame */
         }
       }
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d')!.drawImage(video, 0, 0);
-      return { blob: await toJpeg(canvas), crop };
+      // low-power preview: switch to the full size for this one photo
+      const track = streamRef.current.getVideoTracks()[0];
+      const full = fullRef.current;
+      const low = lowRef.current;
+      let switched = false;
+      if (low && full && track && video.videoWidth < full.w) {
+        try {
+          await track.applyConstraints({ width: { ideal: full.w }, height: { ideal: full.h }, frameRate: {} });
+          switched = await waitForWidth(video, full.w, 4000);
+          // let the camera settle on the new mode (exposure) for a few frames
+          if (switched) await new Promise((r) => setTimeout(r, 400));
+        } catch { /* use the preview frame */ }
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d')!.drawImage(video, 0, 0);
+        return { blob: await toJpeg(canvas), crop };
+      } finally {
+        if (switched && low && track) {
+          track.applyConstraints(low).catch(() => { /* stays full size */ });
+        }
+      }
     },
   }), []);
 

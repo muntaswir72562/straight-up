@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field, asdict
 
 import cv2
@@ -75,6 +76,8 @@ class Options:
     # crop area drawn on the camera preview, as fractions of the photo
     # {"x", "y", "w", "h"} in 0..1; None = find the page automatically
     crop: dict | None = None
+    # "quality" | "fast" | "auto" (fast on a slow PC, see slow_pc)
+    speed: str = "auto"
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Options":
@@ -651,6 +654,39 @@ def is_colour_camera_page(bgr: np.ndarray) -> bool:
     return bool(solid.mean() > 0.02)
 
 
+# ── Speed ────────────────────────────────────────────────────────────
+
+# On a slow PC (a 2-core Celeron laptop: no AVX2, so Tesseract and OpenCV run
+# their slow paths, and every program start is checked by the antivirus) one
+# capture took over 15 minutes. "fast" keeps every step but does less work:
+#   - pages taller than FAST_MAX_PAGE_H are scaled down first (a 24 MP camera
+#     gives ~420 dpi pages; 3000 px is ~315 dpi on a law book page);
+#   - OCR reads each page once (ocr_page(fast=True): no fill-in passes, no
+#     sideways check, no enlargement past 12 MP).
+FAST_MAX_PAGE_H = 3000
+
+_SLOW_PC = None
+
+
+def slow_pc() -> bool:
+    """A PC where "auto" means "fast": 2 or fewer logical CPUs, or no AVX2
+    (Celeron / Pentium Silver / Atom class)."""
+    global _SLOW_PC
+    if _SLOW_PC is None:
+        try:
+            no_avx2 = not cv2.checkHardwareSupport(cv2.CPU_AVX2)
+        except Exception:
+            no_avx2 = False
+        _SLOW_PC = (os.cpu_count() or 1) <= 2 or no_avx2
+    return _SLOW_PC
+
+
+def resolve_speed(speed: str) -> str:
+    if speed == "fast" or (speed not in ("quality", "fast") and slow_pc()):
+        return "fast"
+    return "quality"
+
+
 def estimate_dpi(page_h_px: int) -> int:
     return int(np.clip(round(page_h_px / PAGE_HEIGHT_IN), 150, 600))
 
@@ -728,6 +764,26 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
     """Process one raw capture into pages_dir. Each page is written the
     moment it's done. Returns the list of page metas."""
     from ocr import ocr_page
+    from ocr import engine as ocr_engine
+
+    speed = resolve_speed(opts.speed)
+    fast = speed == "fast"
+    t_start = time.time()
+    tess0 = dict(ocr_engine.STATS)
+    times = {}
+    stage = ["read", time.time()]
+
+    def timed(name):
+        now = time.time()
+        times[stage[0]] = times.get(stage[0], 0.0) + now - stage[1]
+        stage[0], stage[1] = name, now
+
+    user_progress = progress
+
+    def progress(msg):          # noqa: F811  (wraps the caller's callback with timing)
+        timed(msg.split(" (")[0])
+        if user_progress:
+            user_progress(msg)
 
     img = cv2.imread(raw_path, cv2.IMREAD_COLOR)
     if img is None:
@@ -742,6 +798,11 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
     crop = img[y0:y1, x0:x1]
     _log(f"capture {capture_no}: {img.shape[1]}x{img.shape[0]} -> crop {x1 - x0}x{y1 - y0} conf={crop_conf:.2f}")
     del img
+    if fast and crop.shape[0] > FAST_MAX_PAGE_H:
+        f = FAST_MAX_PAGE_H / crop.shape[0]
+        crop = cv2.resize(crop, (max(1, int(round(crop.shape[1] * f))), FAST_MAX_PAGE_H),
+                          interpolation=cv2.INTER_AREA)
+        _log(f"capture {capture_no}: fast: scaled to {crop.shape[1]}x{crop.shape[0]}")
     if progress:
         progress("split")
     split = decide_split(crop, opts)
@@ -772,7 +833,7 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
         dpi = estimate_dpi(final.shape[0])
         if progress:
             progress(f"ocr ({label})")
-        ocr = ocr_page(gray, page_num=idx, render_dpi=dpi)
+        ocr = ocr_page(gray, page_num=idx, render_dpi=dpi, fast=fast)
         del gray
         meta = {
             "id": pid, "capture": capture_no, "index": idx, "of": len(done),
@@ -788,6 +849,13 @@ def process_capture(raw_path: str, pages_dir: str, capture_no: int, opts: Option
         write_page(pages_dir, pid, final, ocr, meta)
         metas.append(meta)
         done[idx - 1] = None  # free the page once written
+    timed("end")
+    runs = ocr_engine.STATS['runs'] - tess0['runs']
+    tsec = ocr_engine.STATS['seconds'] - tess0['seconds']
+    _log(f"capture {capture_no}: {len(metas)} page(s) in {time.time() - t_start:.1f} s, speed={speed}"
+         f"{' (auto)' if opts.speed not in ('quality', 'fast') else ''}: "
+         + ", ".join(f"{k} {v:.1f}" for k, v in times.items() if v >= 0.05)
+         + f"; tesseract {runs} run(s) {tsec:.1f} s")
     return metas
 
 

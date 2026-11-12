@@ -16,19 +16,19 @@ import sys
 import cv2
 import numpy as np
 
-from .engine import run_tesseract, extract_words
+from .engine import run_tesseract, run_tesseract_many, extract_words
 from .blocks import build_blocks
 from .correct import correct_words, join_hyphenated
 
 
-def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
+def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng', fast=False):
     """
     Run OCR on a grayscale page image, including text printed sideways
     (tables turned 90 degrees on the page). See _ocr_page_upright for the
     returned dict. Words read sideways carry 'dir': 90 (text runs upwards)
     or 270 (downwards); their bbox is in page pixels like all others.
     """
-    result = _ocr_page_upright(gray, page_num, render_dpi, lang)
+    result = _ocr_page_upright(gray, page_num, render_dpi, lang, fast=fast)
     try:
         turn = _sideways_turn(gray, page_num, lang, render_dpi)
         if turn is not None:     # ROTATE_90_CLOCKWISE is 0
@@ -40,7 +40,7 @@ def ocr_page(gray, page_num=0, render_dpi=200, lang='fra+eng'):
     return result
 
 
-def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng'):
+def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng', fast=False):
     """
     Run OCR on a grayscale page image.
 
@@ -74,6 +74,10 @@ def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng'):
 
     # ── Adaptive upscale ────────────────────────────────────────────
     scale = max(1.0, min(3.0, 25.0 / xh))
+    if fast and scale > 1.0:
+        # Fast (slow PCs): never enlarge past FAST_MAX_OCR_PIXELS (a cover
+        # photo's grain reads as tiny letters and was enlarged to 22 MP)
+        scale = max(1.0, min(scale, (FAST_MAX_OCR_PIXELS / float(W * H)) ** 0.5))
     dpi = int(render_dpi * scale)
 
     if scale > 1.01:
@@ -115,7 +119,7 @@ def _ocr_page_upright(gray, page_num=0, render_dpi=200, lang='fra+eng'):
     # two other modes and ADD the words they find where nothing was read.
     # What psm 4 read is kept as it is.
     words = _fill_missed_text(upscaled, words, xh * scale, scale, lang, dpi,
-                              page_num)
+                              page_num, fast=fast)
 
     del upscaled
 
@@ -343,6 +347,17 @@ def _flatten_paper(gray, render_dpi=200):
 
 # ── Text psm 4 missed ───────────────────────────────────────────────
 
+# Fast mode (ocr_page(fast=True), chosen for slow PCs): no enlargement past
+# this many pixels (a cover photo's grain reads as tiny letters and was
+# enlarged to 44 MP, read as junk), and at most one fill-in pass (psm 6),
+# only when psm 4 clearly missed text (a column); psm 11 is the slowest.
+# Below FAST_FILL_MIN_COVERAGE the "letters" are mostly not text (a cover
+# photo's grain): a fill-in pass there took 40 s on noise.
+FAST_MAX_OCR_PIXELS = 12_000_000
+FAST_FILL_MIN_COVERAGE = 0.50
+FAST_FILL_MAX_COVERAGE = 0.90
+FAST_FILL_PSMS = (6,)
+
 FILL_MIN_LETTERS = 150       # pages with fewer letters are left alone
 FILL_MAX_COVERAGE = 0.95     # psm 4 normally covers >= 0.97 of the letters
 FILL_MIN_CONF = 60           # an added word must be read this clearly
@@ -372,7 +387,8 @@ def _overlap_frac(a, b):
     return (ix * iy) / float(max(1, min(aw * ah, bw * bh)))
 
 
-def _fill_missed_text(upscaled, words, xh_up, scale, lang, dpi, page_num):
+def _fill_missed_text(upscaled, words, xh_up, scale, lang, dpi, page_num,
+                      fast=False):
     try:
         cen = _letter_centres(upscaled, xh_up) / float(scale)   # page pixels
         if len(cen) < FILL_MIN_LETTERS:
@@ -382,11 +398,13 @@ def _fill_missed_text(upscaled, words, xh_up, scale, lang, dpi, page_num):
             if w['text'].strip():
                 covered |= _inside(cen, w['bbox'])
         before = covered.mean()
-        if before >= FILL_MAX_COVERAGE:
+        if before >= (FAST_FILL_MAX_COVERAGE if fast else FILL_MAX_COVERAGE):
+            return words
+        if fast and before < FAST_FILL_MIN_COVERAGE:
             return words
         kept = [w for w in words if w['text'].strip()]
         added = []
-        for psm in FILL_PSMS:
+        for psm in (FAST_FILL_PSMS if fast else FILL_PSMS):
             extra = extract_words(
                 run_tesseract(upscaled, lang=lang, psm=psm, dpi=dpi), scale=scale)
             for w in extra:
@@ -472,6 +490,10 @@ def _get_layout(gray):
 # text: an empty cell with a speck in it was read as "B", "(ES" or "uo]"
 # with the size of the whole cell.
 TABLE_MAX_WORD_XH = 4.0
+# Table cells are read in one Tesseract run (run_tesseract_many) instead of
+# one process per cell (hundreds on a table page: minutes of process starts
+# on a slow Windows PC). False: one run per cell, as before.
+TABLE_BATCH_OCR = True
 
 
 def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi, xh_up=0.0):
@@ -514,6 +536,11 @@ def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi, xh_up=0.0):
     inset = max(3, int(round(4 * scale)))
     margin = max(8, int(round(10 * scale)))
 
+    # Every cell is prepared first, then all of them are read in ONE
+    # Tesseract run (run_tesseract_many: one process, the models loaded
+    # once); each cell is still read on its own with --psm 6, exactly as
+    # before. Only when that isn't possible are they read one by one.
+    todo = []      # (index in cells, crop, sx0, sy0)
     for ri in range(len(h_lines) - 1):
         for ci in range(len(v_lines) - 1):
             y0, y1 = h_lines[ri], h_lines[ri + 1]
@@ -539,35 +566,49 @@ def _ocr_table_cells(upscaled, grid_boxes, scale, lang, dpi, xh_up=0.0):
                 continue
             crop = cv2.copyMakeBorder(crop, margin, margin, margin, margin,
                                       cv2.BORDER_CONSTANT, value=255)
+            cells.append((ri, ci, '', cell_bbox, []))
+            todo.append((len(cells) - 1, crop, sx0, sy0))
 
+    if not todo:
+        return cells
+    batch = None
+    if TABLE_BATCH_OCR:
+        try:
+            batch = run_tesseract_many([t[1] for t in todo], lang=lang, psm=6, dpi=dpi)
+        except Exception as e:
+            print(f"[ocr] table cells in one run failed ({e}); reading them one by one",
+                  file=sys.stderr)
+            batch = None
+
+    for k, (ci_, crop, sx0, sy0) in enumerate(todo):
+        ri, ci, _, cell_bbox, _ = cells[ci_]
+        words = []
+        try:
+            tsv = batch[k] if batch is not None else run_tesseract(
+                crop, lang=lang, psm=6, dpi=dpi, timeout=30)
+            cw = extract_words(tsv, scale=1.0)
+            for w in cw:
+                t = w['text'].strip()
+                # leftovers of the cell border and specks
+                if not t or re.fullmatch(r"[|_\-\u2014\u2013=~'\u2018\u2019\".,:;]+", t):
+                    continue
+                if w['conf'] < 30 and len(t) <= 2:
+                    continue
+                bx, by, bw, bh = w['bbox']
+                if xh_up > 0 and bh > TABLE_MAX_WORD_XH * xh_up:
+                    continue
+                # crop (upscaled, with margin) -> original page pixels
+                w = dict(w)
+                w['text'] = t
+                w['bbox'] = [int((sx0 - margin + bx) / scale),
+                             int((sy0 - margin + by) / scale),
+                             max(1, int(bw / scale)), max(1, int(bh / scale))]
+                words.append(w)
+            text = ' '.join(w['text'] for w in words).strip()
+        except Exception:
+            text = ''
             words = []
-            try:
-                tsv = run_tesseract(crop, lang=lang, psm=6, dpi=dpi,
-                                     timeout=30)
-                cw = extract_words(tsv, scale=1.0)
-                for w in cw:
-                    t = w['text'].strip()
-                    # leftovers of the cell border and specks
-                    if not t or re.fullmatch(r"[|_\-\u2014\u2013=~'\u2018\u2019\".,:;]+", t):
-                        continue
-                    if w['conf'] < 30 and len(t) <= 2:
-                        continue
-                    bx, by, bw, bh = w['bbox']
-                    if xh_up > 0 and bh > TABLE_MAX_WORD_XH * xh_up:
-                        continue
-                    # crop (upscaled, with margin) -> original page pixels
-                    w = dict(w)
-                    w['text'] = t
-                    w['bbox'] = [int((sx0 - margin + bx) / scale),
-                                 int((sy0 - margin + by) / scale),
-                                 max(1, int(bw / scale)), max(1, int(bh / scale))]
-                    words.append(w)
-                text = ' '.join(w['text'] for w in words).strip()
-            except Exception:
-                text = ''
-                words = []
-
-            cells.append((ri, ci, text, cell_bbox, words))
+        cells[ci_] = (ri, ci, text, cell_bbox, words)
 
     return cells
 

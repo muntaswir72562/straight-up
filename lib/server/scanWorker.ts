@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'child_process';
 import { createInterface } from 'readline';
+import { resolveSpeed } from './system';
 import { spawnPipeline } from './python';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -195,6 +196,7 @@ class ScanWorker {
         dewarp: cap.options.dewarp,
         remove_fingers: cap.options.removeFingers,
         split: ov.split ?? cap.options.split,
+        speed: resolveSpeed(cap.options.speed),
         rotate: ov.rotate ?? {},
         keep_colour: ov.keepColour ?? {},
         per_page: perPage,

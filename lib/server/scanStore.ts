@@ -145,6 +145,7 @@ export function normaliseOptions(o: Partial<ScanOptions> | undefined, base = DEF
     dewarp: typeof o?.dewarp === 'boolean' ? o.dewarp : base.dewarp,
     removeFingers: typeof o?.removeFingers === 'boolean' ? o.removeFingers : base.removeFingers,
     split: o?.split === 'auto' || o?.split === 'one' || o?.split === 'two' ? o.split : base.split,
+    speed: o?.speed === 'auto' || o?.speed === 'quality' || o?.speed === 'fast' ? o.speed : base.speed ?? 'auto',
   };
 }
 
